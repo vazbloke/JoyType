@@ -1,97 +1,133 @@
 package com.vazbloke.t9controller
 
+// --- Swipe Prediction Engine ---
 import android.graphics.PointF
 import kotlin.math.*
 
-// --- Swipe Prediction Engine ---
 class SwipeEngine {
 
-    // 1. Group keys strictly by Row to allow for easy Y-axis snapping
-    private val row0 = listOf('q' to 0f, 'w' to 1f, 'e' to 2f, 'r' to 3f, 't' to 4f, 'y' to 5f, 'u' to 6f, 'i' to 7f, 'o' to 8f, 'p' to 9f)
-    private val row1 = listOf('a' to 0.5f, 's' to 1.5f, 'd' to 2.5f, 'f' to 3.5f, 'g' to 4.5f, 'h' to 5.5f, 'j' to 6.5f, 'k' to 7.5f, 'l' to 8.5f)
-    private val row2 = listOf('z' to 1.5f, 'x' to 2.5f, 'c' to 3.5f, 'v' to 4.5f, 'b' to 5.5f, 'n' to 6.5f, 'm' to 7.5f)
+    private val keyboardLayout = mapOf(
+        'q' to PointF(0f, 0f), 'w' to PointF(1f, 0f), 'e' to PointF(2f, 0f), 'r' to PointF(3f, 0f), 't' to PointF(4f, 0f), 'y' to PointF(5f, 0f), 'u' to PointF(6f, 0f), 'i' to PointF(7f, 0f), 'o' to PointF(8f, 0f), 'p' to PointF(9f, 0f),
+        'a' to PointF(0.5f, 1f), 's' to PointF(1.5f, 1f), 'd' to PointF(2.5f, 1f), 'f' to PointF(3.5f, 1f), 'g' to PointF(4.5f, 1f), 'h' to PointF(5.5f, 1f), 'j' to PointF(6.5f, 1f), 'k' to PointF(7.5f, 1f), 'l' to PointF(8.5f, 1f),
+        'z' to PointF(1.5f, 2f), 'x' to PointF(2.5f, 2f), 'c' to PointF(3.5f, 2f), 'v' to PointF(4.5f, 2f), 'b' to PointF(5.5f, 2f), 'n' to PointF(6.5f, 2f), 'm' to PointF(7.5f, 2f)
+    )
 
-    // Expand your dictionary here
-    private val dictionary = listOf("hello", "world", "good", "game", "odin", "test", "help", "the", "there", "their")
+    private val dictionary = listOf("hello", "world", "good", "game", "odin", "test", "help", "rest", "the", "there", "their")
 
-    fun decodeSwipe(path: List<PointF>): List<String> {
-        if (path.size < 2) return emptyList()
+    // Calculates the anchor point on the QWERTY grid based on the joystick's initial tilt (-1 to 1)
+    private fun getStartAnchorChars(joystickX: Float, joystickY: Float): Set<Char> {
+        // Map joystick [-1, 1] to Keyboard [0, 9] and [0, 2]
+        val virtualX = ((joystickX + 1f) / 2f) * 9f
+        val virtualY = ((joystickY + 1f) / 2f) * 2f
+        val anchorPoint = PointF(virtualX, virtualY)
 
-        // Apply a moving average to smooth out the curve and eliminate joystick noise
-        val smoothedPath = smoothPath(path)
-
-        // Find the sharp corners
-        val inflectionPoints = extractInflectionPoints(smoothedPath)
-
-        // Map each point to a cluster of the 3 most likely characters on that row
-        val charClusters = inflectionPoints.map { getPossibleChars(it) }
-
-        if (charClusters.isEmpty()) return emptyList()
-
-        val startChars = charClusters.first()
-        val endChars = charClusters.last()
-        val middleClusters = charClusters.drop(1).dropLast(1)
-
-        // Filter the dictionary using the fuzzy clusters
-        return dictionary.filter { word ->
-            if (word.length < 2) return@filter false
-
-            // 1. Word MUST start and end with one of the 3 possible keys
-            if (!startChars.contains(word.first()) || !endChars.contains(word.last())) return@filter false
-
-            // 2. Word MUST contain at least one letter from each intermediate cluster, in order
-            var currentWordIndex = 0
-            for (cluster in middleClusters) {
-                // indexOfAny checks if ANY character in the cluster exists in the string after currentWordIndex
-                val foundIndex = word.indexOfAny(cluster.toCharArray(), currentWordIndex)
-                if (foundIndex == -1) return@filter false
-                currentWordIndex = foundIndex // Move the search window forward
-            }
-            true
-        }
-    }
-
-    private fun getPossibleChars(point: PointF): Set<Char> {
-        // 1. Snap to Row based purely on Joystick Y (Up, Center, Down)
-        val targetRow = when {
-            point.y < 0.5f -> row0 // Joystick Up
-            point.y > 1.5f -> row2 // Joystick Down
-            else -> row1           // Joystick Center
-        }
-
-        // 2. Find the 3 closest keys on that specific row based on X distance
-        return targetRow
-            .sortedBy { abs(it.second - point.x) }
-            .take(3)
-            .map { it.first }
+        // Return the 4 closest letters to allow for sloppy starting positions
+        return keyboardLayout.entries
+            .sortedBy { getDistance(it.value, anchorPoint.x, anchorPoint.y) }
+            .take(4)
+            .map { it.key }
             .toSet()
     }
 
-    // #FIXME This should be private. Currently hacked just to get it working
-    public fun smoothPath(path: List<PointF>): List<PointF> {
-        // A simple 3-point moving average to iron out micro-wobbles
+    fun decodeSwipe(rawPath: List<PointF>, startJoyX: Float, startJoyY: Float): List<String> {
+        val startChars = getStartAnchorChars(startJoyX, startJoyY)
+
+        // Handle micro-swipes (just tapping L1 on a letter)
+        if (rawPath.size < 3) {
+            return dictionary.filter { startChars.contains(it.first()) && it.length == 1 }
+        }
+
+        val smoothed = smoothPath(rawPath)
+        val inflections = extractInflectionPoints(smoothed)
+        val userAngles = calculateAngles(inflections)
+
+        // Score words based on how closely their angle sequences match the user's
+        return dictionary
+            .filter { startChars.contains(it.first()) }
+            .map { word -> word to scoreWordShape(word, userAngles) }
+            .filter { it.second < 2.5f } // Threshold: discard terrible matches
+            .sortedBy { it.second }      // Lowest score is the best match
+            .map { it.first }
+    }
+
+    private fun scoreWordShape(word: String, userAngles: List<Float>): Float {
+        // Remove consecutive duplicate letters ("hello" -> "helo") because
+        // you don't draw a corner for double letters.
+        val collapsedWord = word.replace(Regex("(.)\\1+"), "$1")
+        val idealAngles = getIdealAnglesForWord(collapsedWord)
+
+        var penaltyScore = 0f
+        val maxLen = max(userAngles.size, idealAngles.size)
+
+        // Greedily compare the angles.
+        for (i in 0 until maxLen) {
+            val userAng = userAngles.getOrNull(i)
+            val idealAng = idealAngles.getOrNull(i)
+
+            if (userAng != null && idealAng != null) {
+                penaltyScore += angleDiff(userAng, idealAng)
+            } else {
+                // Penalize for missing or extra corners (approx 90 degrees penalty)
+                penaltyScore += PI.toFloat() / 2f
+            }
+        }
+        return penaltyScore
+    }
+
+    private fun getIdealAnglesForWord(word: String): List<Float> {
+        if (word.length < 2) return emptyList()
+        val points = word.mapNotNull { keyboardLayout[it] }
+
+        val rawAngles = calculateAngles(points)
+        val collapsedAngles = mutableListOf<Float>()
+
+        // If a word makes a straight line (e.g., "WER"), we collapse the matching angles
+        // into a single vector so it expects one long, straight swipe.
+        if (rawAngles.isNotEmpty()) {
+            collapsedAngles.add(rawAngles.first())
+            for (i in 1 until rawAngles.size) {
+                if (angleDiff(rawAngles[i], collapsedAngles.last()) > 0.4f) { // ~20 degrees
+                    collapsedAngles.add(rawAngles[i])
+                }
+            }
+        }
+        return collapsedAngles
+    }
+
+    private fun calculateAngles(points: List<PointF>): List<Float> {
+        val angles = mutableListOf<Float>()
+        for (i in 0 until points.size - 1) {
+            val dx = points[i+1].x - points[i].x
+            val dy = points[i+1].y - points[i].y
+            angles.add(atan2(dy, dx)) // Returns radians
+        }
+        return angles
+    }
+
+    private fun angleDiff(a: Float, b: Float): Float {
+        var diff = abs(a - b)
+        while (diff > PI) diff -= (2 * PI).toFloat()
+        return abs(diff)
+    }
+
+    // (Keep your existing smoothPath and extractInflectionPoints functions here)
+    fun smoothPath(path: List<PointF>): List<PointF> {
         if (path.size < 3) return path
         val smoothed = mutableListOf<PointF>()
         smoothed.add(path.first())
-
         for (i in 1 until path.size - 1) {
             val avgX = (path[i-1].x + path[i].x + path[i+1].x) / 3f
             val avgY = (path[i-1].y + path[i].y + path[i+1].y) / 3f
             smoothed.add(PointF(avgX, avgY))
         }
-
         smoothed.add(path.last())
         return smoothed
     }
 
-    // #FIXME This should be private. Currently hacked just to get it working
     fun extractInflectionPoints(path: List<PointF>): List<PointF> {
         val points = mutableListOf<PointF>()
         points.add(path.first())
-
         var lastInflectionIndex = 0
-
-        // INCREASED STEP: Looks further ahead to ignore circular joystick arcs
         val step = 3
 
         for (i in step until path.size - step) {
@@ -112,19 +148,17 @@ class SwipeEngine {
                 val cosTheta = (dotProduct / (mag1 * mag2)).coerceIn(-1.0f, 1.0f)
                 val angle = acos(cosTheta)
 
-                // STRICTER ANGLE: ~75 degrees (1.3 radians).
-                // It must be a sharp turn, not just a wobbly line.
                 if (angle > 1.3f && (i - lastInflectionIndex) > step) {
                     points.add(curr)
                     lastInflectionIndex = i
                 }
             }
         }
-
-        if (points.last() != path.last()) {
-            points.add(path.last())
-        }
-
+        if (points.last() != path.last()) points.add(path.last())
         return points
+    }
+
+    private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
+        return sqrt((x2 - p1.x).toDouble().pow(2.0) + (y2 - p1.y).toDouble().pow(2.0)).toFloat()
     }
 }

@@ -52,6 +52,12 @@ class OdinT9Service : InputMethodService() {
 
     private lateinit var swipeDebugView: SwipeDebugView
 
+    // New State Variables for Swipe Anchor
+    private var anchorJoyX = 0f
+    private var anchorJoyY = 0f
+    private var currentJoyX = 0f
+    private var currentJoyY = 0f
+
     override fun onCreateInputView(): View {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)
@@ -85,7 +91,7 @@ class OdinT9Service : InputMethodService() {
             InputMode.SWIPE -> "Mode: Swipe"
         }
         if (currentMode == InputMode.SWIPE) {
-            tvPredictions.text = "Hold R1 to Swipe"
+            tvPredictions.text = "Hold L1 to Swipe"
         }
     }
 
@@ -132,35 +138,26 @@ class OdinT9Service : InputMethodService() {
                         yAxis = event.getAxisValue(MotionEvent.AXIS_RZ)
                     }
 
-                    // --- THE "IN-BETWEEN" MOVEMENT ---
-                    // By multiplying the axis by its own absolute value, we create a curve.
-                    // A 20% tilt results in 4% speed (highly precise).
-                    // A 100% tilt results in 100% speed (very fast).
-                    if (Math.abs(xAxis) > 0.1f || Math.abs(yAxis) > 0.1f) {
-                        val moveX = xAxis * Math.abs(xAxis) * 0.4f
-                        val moveY = yAxis * Math.abs(yAxis) * 0.4f
+                    // Always track the physical joystick state so it's ready when L1 is pressed
+                    currentJoyX = xAxis
+                    currentJoyY = yAxis
 
-                        cursorX = (cursorX + moveX).coerceIn(0f, 9f)
-                        cursorY = (cursorY + moveY).coerceIn(0f, 2f)
+                    if (isSwiping) {
+                        // We only care about the shape relative to the start point
+                        val relativeX = currentJoyX - anchorJoyX
+                        val relativeY = currentJoyY - anchorJoyY
 
-                        if (isSwiping) {
-                            val lastPoint = currentSwipePath.lastOrNull()
-                            if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.3f) {
-                                currentSwipePath.add(PointF(cursorX, cursorY))
+                        val lastPoint = currentSwipePath.lastOrNull()
+                        // 0.1f distance threshold to filter out hardware micro-jitter
+                        if (lastPoint == null || getDistance(lastPoint, relativeX, relativeY) > 0.1f) {
+                            currentSwipePath.add(PointF(relativeX, relativeY))
 
-                                val smoothed = swipeEngine.smoothPath(currentSwipePath)
-                                val corners = swipeEngine.extractInflectionPoints(smoothed)
+                            val smoothed = swipeEngine.smoothPath(currentSwipePath)
+                            val corners = swipeEngine.extractInflectionPoints(smoothed)
 
-                                mainHandler.post {
-                                    swipeDebugView.updatePath(smoothed, corners)
-                                    tvPredictions.text = "Swiping... [${corners.size} corners]"
-                                }
-                            }
-                        } else {
-                            // Show a live preview dot so you know where your cursor is
-                            // resting BEFORE you press R1 to start swiping.
                             mainHandler.post {
-                                swipeDebugView.updatePath(listOf(PointF(cursorX, cursorY)), emptyList())
+                                swipeDebugView.updatePath(smoothed, corners)
+                                tvPredictions.text = "Shape Corners: ${corners.size - 2}"
                             }
                         }
                     }
@@ -270,14 +267,22 @@ class OdinT9Service : InputMethodService() {
             }
             InputMode.SWIPE -> {
                 when (keyCode) {
-                    KeyEvent.KEYCODE_BUTTON_R1 -> {
+                    // CHANGED TO L1: Press down to lock the anchor and start recording
+                    KeyEvent.KEYCODE_BUTTON_L1 -> {
                         if (!isRepeat && !isSwiping) {
                             isSwiping = true
                             currentSwipePath.clear()
-                            currentSwipePath.add(PointF(cursorX, cursorY))
-                            tvPredictions.text = "Swiping..."
+
+                            // Capture the joystick's physical tilt at the exact moment L1 is pressed
+                            anchorJoyX = currentJoyX
+                            anchorJoyY = currentJoyY
+
+                            // Start path at center (0,0) for the relative vector drawing
+                            currentSwipePath.add(PointF(0f, 0f))
+                            tvPredictions.text = "Recording Shape..."
                         }
                     }
+
                     KeyEvent.KEYCODE_BUTTON_X -> if (!isRepeat) cyclePrediction(-1)
                     KeyEvent.KEYCODE_BUTTON_A -> if (!isRepeat) cyclePrediction(1)
                     KeyEvent.KEYCODE_BUTTON_B -> if (!isRepeat) commitCurrentWord(" ")
@@ -305,7 +310,9 @@ class OdinT9Service : InputMethodService() {
             stopBackspaceRepeat()
             return true
         }
-        if (currentMode == InputMode.SWIPE && keyCode == KeyEvent.KEYCODE_BUTTON_R1) {
+
+        // CHANGED TO L1
+        if (currentMode == InputMode.SWIPE && keyCode == KeyEvent.KEYCODE_BUTTON_L1) {
             if (isSwiping) {
                 isSwiping = false
                 processSwipe()
@@ -431,32 +438,24 @@ class OdinT9Service : InputMethodService() {
     }
 
     private fun processSwipe() {
-        val predictions = swipeEngine.decodeSwipe(currentSwipePath)
+        val predictions = swipeEngine.decodeSwipe(currentSwipePath, anchorJoyX, anchorJoyY)
 
         if (predictions.isNotEmpty()) {
-            // Get the absolute best match
             val bestMatch = predictions.first()
-
-            // Instantly inject it into the text box with a trailing space
             currentInputConnection?.commitText("$bestMatch ", 1)
 
-            // Keep the UI updated just so the user sees what was chosen
-            // and what the alternative guesses were
             val alternatives = predictions.take(3).joinToString("   |   ")
             tvPredictions.text = alternatives
-
         } else {
             tvPredictions.text = "No swipe match"
         }
-
-        // Clear the debug view so it's ready for the next swipe
         swipeDebugView.clear()
     }
 
     private fun updateUI() {
         if (currentPredictions.isEmpty()) {
             if (currentMode == InputMode.SWIPE && currentSwipePath.isEmpty()) {
-                 tvPredictions.text = "Hold R1 to Swipe"
+                 tvPredictions.text = "Hold L1 to Swipe"
             } else if (currentSequence.isNotEmpty()) {
                 tvPredictions.text = "No match: $currentSequence"
             }

@@ -14,7 +14,7 @@ class SwipeDebugView @JvmOverloads constructor(
 ) : View(context, attrs, defStyleAttr) {
 
     private val pathPaint = Paint().apply {
-        color = Color.parseColor("#884488FF") // Semi-transparent blue
+        color = Color.parseColor("#4488FF") // Bright blue line
         style = Paint.Style.STROKE
         strokeWidth = 8f
         isAntiAlias = true
@@ -28,22 +28,13 @@ class SwipeDebugView @JvmOverloads constructor(
         isAntiAlias = true
     }
 
-    private val textPaint = Paint().apply {
-        color = Color.parseColor("#44FFFFFF") // Faint white for keyboard map
-        textSize = 40f
-        textAlign = Paint.Align.CENTER
-        isAntiAlias = true
+    private val centerPaint = Paint().apply {
+        color = Color.DKGRAY
+        style = Paint.Style.FILL
     }
 
     private var swipePath = listOf<PointF>()
     private var inflectionPoints = listOf<PointF>()
-
-    // The exact spatial map the algorithm uses
-    private val keyboardLayout = mapOf(
-        'q' to PointF(0f, 0f), 'w' to PointF(1f, 0f), 'e' to PointF(2f, 0f), 'r' to PointF(3f, 0f), 't' to PointF(4f, 0f), 'y' to PointF(5f, 0f), 'u' to PointF(6f, 0f), 'i' to PointF(7f, 0f), 'o' to PointF(8f, 0f), 'p' to PointF(9f, 0f),
-        'a' to PointF(0.5f, 1f), 's' to PointF(1.5f, 1f), 'd' to PointF(2.5f, 1f), 'f' to PointF(3.5f, 1f), 'g' to PointF(4.5f, 1f), 'h' to PointF(5.5f, 1f), 'j' to PointF(6.5f, 1f), 'k' to PointF(7.5f, 1f), 'l' to PointF(8.5f, 1f),
-        'z' to PointF(1.5f, 2f), 'x' to PointF(2.5f, 2f), 'c' to PointF(3.5f, 2f), 'v' to PointF(4.5f, 2f), 'b' to PointF(5.5f, 2f), 'n' to PointF(6.5f, 2f), 'm' to PointF(7.5f, 2f)
-    )
 
     fun updatePath(rawPath: List<PointF>, inflections: List<PointF>) {
         this.swipePath = rawPath
@@ -60,34 +51,31 @@ class SwipeDebugView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        val scaleX = width / 10f
-        val scaleY = height / 3f
+        val centerX = width / 2f
+        val centerY = height / 2f
 
-        // 1. Draw the Keyboard Map
-        for ((char, point) in keyboardLayout) {
-            val screenX = (point.x + 0.5f) * scaleX
-            // Adjust Y slightly so text centers well
-            val screenY = (point.y + 0.5f) * scaleY + (textPaint.textSize / 3)
-            canvas.drawText(char.uppercaseChar().toString(), screenX, screenY, textPaint)
-        }
+        // Draw a subtle center dot representing the joystick's resting position
+        canvas.drawCircle(centerX, centerY, 10f, centerPaint)
 
         if (swipePath.isEmpty()) return
 
-        // 2. Draw the continuous path
+        // Map joystick bounds (-1 to 1) to the canvas size
+        val scaleX = width / 2.5f
+        val scaleY = height / 2.5f
+
         val drawPath = Path()
         swipePath.forEachIndexed { index, point ->
-            val screenX = (point.x + 0.5f) * scaleX
-            val screenY = (point.y + 0.5f) * scaleY
+            val screenX = centerX + (point.x * scaleX)
+            val screenY = centerY + (point.y * scaleY)
 
             if (index == 0) drawPath.moveTo(screenX, screenY)
             else drawPath.lineTo(screenX, screenY)
         }
         canvas.drawPath(drawPath, pathPaint)
 
-        // 3. Draw the inflection points
         for (point in inflectionPoints) {
-            val screenX = (point.x + 0.5f) * scaleX
-            val screenY = (point.y + 0.5f) * scaleY
+            val screenX = centerX + (point.x * scaleX)
+            val screenY = centerY + (point.y * scaleY)
             canvas.drawCircle(screenX, screenY, 12f, pointPaint)
         }
     }

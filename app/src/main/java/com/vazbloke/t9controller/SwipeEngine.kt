@@ -89,32 +89,106 @@ class SwipeEngine {
         return abs(diff)
     }
 
+// ... (Keep dictionary, keyboardLayout, and getStartAnchorChars from before) ...
+
     fun decodeSwipe(rawPath: List<PointF>, startJoyX: Float, startJoyY: Float): List<String> {
         val startChars = getStartAnchorChars(startJoyX, startJoyY)
 
-        // Handle micro-swipes (just tapping L1 on a letter)
         if (rawPath.size < 3) {
             return dictionary.filter { startChars.contains(it.first()) && it.length == 1 }
         }
 
-        // NO MORE SMOOTHING! RDP handles noise and geometry automatically.
+        // PHASE 2: Curve to Points
         val inflections = extractInflectionPoints(rawPath)
+
+        // PHASE 3: Points to Prediction
         val userAngles = calculateAngles(inflections)
 
-        // Score words based on how closely their angle sequences match the user's
         return dictionary
             .filter { startChars.contains(it.first()) }
             .map { word -> word to scoreWordShape(word, userAngles) }
-            .filter { it.second < 2.5f } // Threshold: discard terrible matches
-            .sortedBy { it.second }      // Lowest score is the best match
+            .filter { it.second < 2.5f }
+            .sortedBy { it.second }
             .map { it.first }
     }
 
-    fun extractInflectionPoints(path: List<PointF>): List<PointF> {
-        // 0.25f is the geometric strictness (epsilon).
-        // Higher ignores more wobbles, lower catches tinier corners.
-        return rdp(path, 0.25f)
+    fun extractInflectionPoints(rawPath: List<PointF>): List<PointF> {
+        if (rawPath.size < 5) return rawPath.toList()
+
+        // 1. Light smoothing to erase 60Hz hardware micro-jitters
+        val path = smoothPath(rawPath)
+
+        val corners = mutableListOf<PointF>()
+        corners.add(path.first())
+
+        val deflections = FloatArray(path.size)
+        val step = 3 // Look ahead/behind window
+
+        // 2. Calculate the "Deflection Angle" at every single point
+        for (i in step until path.size - step) {
+            val prev = path[i - step]
+            val curr = path[i]
+            val next = path[i + step]
+
+            val v1x = curr.x - prev.x
+            val v1y = curr.y - prev.y
+            val v2x = next.x - curr.x
+            val v2y = next.y - curr.y
+
+            val dot = v1x*v2x + v1y*v2y
+            val mag1 = sqrt(v1x*v1x + v1y*v1y)
+            val mag2 = sqrt(v2x*v2x + v2y*v2y)
+
+            if (mag1 > 0f && mag2 > 0f) {
+                val cosTheta = (dot / (mag1 * mag2)).coerceIn(-1f, 1f)
+                // acos(1) = 0 rads (straight line). acos(0) = 1.57 rads (90 deg turn).
+                deflections[i] = acos(cosTheta)
+            }
+        }
+
+        // 3. Find the Local Maxima (The sharpest tip of the corner)
+        var lastCornerIndex = 0
+        for (i in step until path.size - step) {
+            val d = deflections[i]
+
+            // STRICT THRESHOLD: 1.0 radians is roughly a 57-degree direction change.
+            // This completely ignores gentle sweeps and obtuse curves.
+            if (d > 1.0f && (i - lastCornerIndex) > step) {
+
+                // Ensure this specific point is the absolute sharpest point in its neighborhood
+                var isLocalMax = true
+                val window = 2
+                for (j in max(0, i - window)..min(path.size - 1, i + window)) {
+                    if (deflections[j] > d) {
+                        isLocalMax = false
+                        break
+                    }
+                }
+
+                if (isLocalMax) {
+                    corners.add(path[i])
+                    lastCornerIndex = i
+                }
+            }
+        }
+
+        corners.add(path.last())
+        return corners
     }
+
+    private fun smoothPath(path: List<PointF>): List<PointF> {
+        val smoothed = mutableListOf<PointF>()
+        smoothed.add(path.first())
+        for (i in 1 until path.size - 1) {
+            val avgX = (path[i-1].x + path[i].x + path[i+1].x) / 3f
+            val avgY = (path[i-1].y + path[i].y + path[i+1].y) / 3f
+            smoothed.add(PointF(avgX, avgY))
+        }
+        smoothed.add(path.last())
+        return smoothed
+    }
+
+    // ... (Keep calculateAngles, angleDiff, scoreWordShape, getIdealAnglesForWord) ...
 
     // --- Ramer-Douglas-Peucker Algorithm ---
     private fun rdp(points: List<PointF>, epsilon: Float): List<PointF> {

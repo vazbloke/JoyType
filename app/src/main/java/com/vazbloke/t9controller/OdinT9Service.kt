@@ -167,36 +167,31 @@ class OdinT9Service : InputMethodService() {
                         rawY = event.getAxisValue(MotionEvent.AXIS_RZ)
                     }
 
-                    // --- NEW: Map the physical circular input to a virtual square space ---
-                    val squareMappedPoint = mapCircleToSquare(rawX, rawY)
+                    val mapped = mapCircleToSquare(rawX, rawY)
 
-                    // Always track the mapped state so it's ready when L1 is pressed
-                    currentJoyX = squareMappedPoint.x
-                    currentJoyY = squareMappedPoint.y
+                    // Always track physical mapped state for the anchor
+                    currentJoyX = mapped.x
+                    currentJoyY = mapped.y
 
                     if (isSwiping) {
-                        // We only care about the shape relative to the start point
-                        val relativeX = currentJoyX - anchorJoyX
-                        val relativeY = currentJoyY - anchorJoyY
+                        // PHASE 1: DRASTICALLY REDUCED SPEED
+                        // 0.03f means it takes much longer to reach the edges of the box.
+                        // This allows you to draw careful, deliberate shapes.
+                        cursorX += mapped.x * 0.03f
+                        cursorY += mapped.y * 0.03f
 
                         val lastPoint = currentSwipePath.lastOrNull()
+                        // Small threshold to capture a high-resolution raw curve
+                        if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.05f) {
+                            currentSwipePath.add(PointF(cursorX, cursorY))
 
-                        // 0.1f distance threshold to filter out hardware micro-jitter
-                        if (lastPoint == null || getDistance(lastPoint, relativeX, relativeY) > 0.1f) {
-                            currentSwipePath.add(PointF(relativeX, relativeY))
-// 0.1f distance threshold to filter out hardware micro-jitter
-                            if (lastPoint == null || getDistance(lastPoint, relativeX, relativeY) > 0.1f) {
-                                currentSwipePath.add(PointF(relativeX, relativeY))
+                            // PHASE 2: CURVE TO POINTS
+                            val corners = swipeEngine.extractInflectionPoints(currentSwipePath)
 
-                                // Removed smoothed path. Pass raw path directly to RDP.
-                                val corners = swipeEngine.extractInflectionPoints(currentSwipePath)
-
-                                mainHandler.post {
-                                    // Draw the raw path and the mathematically extracted corners
-                                    swipeDebugView.updatePath(currentSwipePath, corners)
-                                    val displayCorners = Math.max(0, corners.size - 2)
-                                    tvPredictions.text = "Shape Corners: $displayCorners"
-                                }
+                            mainHandler.post {
+                                swipeDebugView.updatePath(currentSwipePath, corners)
+                                val displayCorners = Math.max(0, corners.size - 2)
+                                tvPredictions.text = "Shape Corners: $displayCorners"
                             }
                         }
                     }
@@ -312,12 +307,15 @@ class OdinT9Service : InputMethodService() {
                             isSwiping = true
                             currentSwipePath.clear()
 
-                            // Capture the joystick's physical tilt at the exact moment L1 is pressed
+                            // Reset cursor to center of the relative canvas
+                            cursorX = 0f
+                            cursorY = 0f
+                            currentSwipePath.add(PointF(cursorX, cursorY))
+
+                            // Capture anchor for dictionary filtering
                             anchorJoyX = currentJoyX
                             anchorJoyY = currentJoyY
 
-                            // Start path at center (0,0) for the relative vector drawing
-                            currentSwipePath.add(PointF(0f, 0f))
                             tvPredictions.text = "Recording Shape..."
                         }
                     }

@@ -172,33 +172,38 @@ class OdinT9Service : InputMethodService() {
                     }
 
                     val mapped = mapCircleToSquare(rawX, rawY)
+
+                    // 1. OUTLIER SWALLOWING
+                    val deltaX = Math.abs(mapped.x - currentJoyX)
+                    val deltaY = Math.abs(mapped.y - currentJoyY)
+                    if (deltaX > 0.8f || deltaY > 0.8f) {
+                        // It's a massive hardware glitch warp. Ignore it this frame.
+                        currentJoyX = mapped.x
+                        currentJoyY = mapped.y
+                        return true
+                    }
+
                     currentJoyX = mapped.x
                     currentJoyY = mapped.y
 
+                    // 2. ABSOLUTE RUBBER BAND FILTER
+                    // Instead of adding to a speed, we interpolate the absolute position.
+                    // 0.3f means the cursor moves 30% of the distance to the joystick's actual position per frame.
+                    // It smoothly glides to the target and STOPS when it gets there.
+                    val smoothingFactor = 0.3f
+                    smoothedJoyX = (smoothedJoyX * (1f - smoothingFactor)) + (mapped.x * smoothingFactor)
+                    smoothedJoyY = (smoothedJoyY * (1f - smoothingFactor)) + (mapped.y * smoothingFactor)
+
                     if (isSwiping) {
-                        // 1. OUTLIER SWALLOWING
-                        // If the joystick value jumps by more than 80% of its total range in a single
-                        // frame (16ms), it's hardware noise. Swallow it by returning early.
-                        val deltaX = Math.abs(mapped.x - smoothedJoyX)
-                        val deltaY = Math.abs(mapped.y - smoothedJoyY)
-                        if (deltaX > 0.8f || deltaY > 0.8f) {
-                            return true
-                        }
-
-                        // 2. THE RUBBER BAND FILTER (Exponential Moving Average)
-                        // The new velocity is 75% of the old velocity, and 25% of the new joystick input.
-                        // This naturally absorbs all high-frequency jitter.
-                        val smoothingFactor = 0.25f
-                        smoothedJoyX = (smoothedJoyX * (1f - smoothingFactor)) + (mapped.x * smoothingFactor)
-                        smoothedJoyY = (smoothedJoyY * (1f - smoothingFactor)) + (mapped.y * smoothingFactor)
-
-                        // Apply the deeply smoothed velocity to the cursor
-                        cursorX += smoothedJoyX * 0.03f
-                        cursorY += smoothedJoyY * 0.03f
+                        // The cursor IS the smoothed absolute coordinate [-1.0 to 1.0]
+                        cursorX = smoothedJoyX
+                        cursorY = smoothedJoyY
 
                         val lastPoint = currentSwipePath.lastOrNull()
 
-                        if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.05f) {
+                        // We still need a small distance threshold (0.02f) so we don't
+                        // record 10,000 overlapping points while you hold the stick still.
+                        if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.02f) {
                             currentSwipePath.add(PointF(cursorX, cursorY))
 
                             val corners = swipeEngine.extractInflectionPoints(currentSwipePath)
@@ -209,6 +214,11 @@ class OdinT9Service : InputMethodService() {
                                 tvPredictions.text = "Shape Corners: $displayCorners"
                             }
                         }
+                    } else {
+                        // Keep the smoothed variables updated even when not swiping,
+                        // so it doesn't "jump" the moment you press L1.
+                        smoothedJoyX = mapped.x
+                        smoothedJoyY = mapped.y
                     }
                     return true
                 }
@@ -316,20 +326,19 @@ class OdinT9Service : InputMethodService() {
             }
             InputMode.SWIPE -> {
                 when (keyCode) {
-                    // CHANGED TO L1: Press down to lock the anchor and start recording
                     KeyEvent.KEYCODE_BUTTON_L1 -> {
                         if (!isRepeat && !isSwiping) {
                             isSwiping = true
                             currentSwipePath.clear()
 
-                            cursorX = 0f
-                            cursorY = 0f
-                            smoothedJoyX = 0f // Reset filter
-                            smoothedJoyY = 0f // Reset filter
+                            // Start exactly where the smoothed joystick currently is
+                            cursorX = smoothedJoyX
+                            cursorY = smoothedJoyY
                             currentSwipePath.add(PointF(cursorX, cursorY))
 
-                            anchorJoyX = currentJoyX
-                            anchorJoyY = currentJoyY
+                            // Capture anchor for dictionary filtering
+                            anchorJoyX = cursorX
+                            anchorJoyY = cursorY
 
                             tvPredictions.text = "Recording Shape..."
                         }

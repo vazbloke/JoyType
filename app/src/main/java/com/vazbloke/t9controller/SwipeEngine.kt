@@ -67,7 +67,8 @@ class SwipeEngine {
             .toSet()
     }
 
-    private fun smoothPath(path: List<PointF>): List<PointF> {
+    // #FIXME This should be private. Currently hacked just to get it working
+    public fun smoothPath(path: List<PointF>): List<PointF> {
         // A simple 3-point moving average to iron out micro-wobbles
         if (path.size < 3) return path
         val smoothed = mutableListOf<PointF>()
@@ -83,7 +84,8 @@ class SwipeEngine {
         return smoothed
     }
 
-    private fun extractInflectionPoints(path: List<PointF>): List<PointF> {
+    // #FIXME This should be private. Currently hacked just to get it working
+    public fun extractInflectionPoints(path: List<PointF>): List<PointF> {
         val points = mutableListOf<PointF>()
         points.add(path.first())
 

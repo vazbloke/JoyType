@@ -13,6 +13,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.sqrt
+import kotlin.math.pow
 
 class OdinT9Service : InputMethodService() {
 
@@ -49,10 +50,13 @@ class OdinT9Service : InputMethodService() {
     private val cursorSpeed = 0.5f
     private val currentSwipePath = mutableListOf<PointF>()
 
+    private lateinit var swipeDebugView: SwipeDebugView
+
     override fun onCreateInputView(): View {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)
         tvMode = view.findViewById(R.id.tv_mode)
+        swipeDebugView = view.findViewById(R.id.swipe_debug_view)
 
         view.findViewById<View>(R.id.btn_toggle_mode).setOnClickListener {
             toggleMode()
@@ -71,6 +75,7 @@ class OdinT9Service : InputMethodService() {
         currentSequence = ""
         updatePredictions()
         updateModeUI()
+        swipeDebugView.clear()
     }
 
     private fun updateModeUI() {
@@ -92,12 +97,11 @@ class OdinT9Service : InputMethodService() {
         if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK ||
             event.source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD) {
 
-            // Handle L2/R2 analog triggers
-            val lTrigger = Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE))
-            val rTrigger = Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS))
+            val lTrigger = max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE))
+            val rTrigger = max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS))
 
-            updateL2State(lTrigger > 0.5f, true)
-            updateR2State(rTrigger > 0.5f, true)
+            updateL2State(lTrigger > 0.5f, isAnalog = true)
+            updateR2State(rTrigger > 0.5f, isAnalog = true)
 
             when (currentMode) {
                 InputMode.LJOY_RBUTTONS -> {
@@ -115,41 +119,41 @@ class OdinT9Service : InputMethodService() {
                     val z = event.getAxisValue(MotionEvent.AXIS_Z)
                     val rz = event.getAxisValue(MotionEvent.AXIS_RZ)
 
-                    handleJoystickDirection(x, y, true)
-                    handleJoystickDirection(z, rz, false)
+                    handleJoystickDirection(x, y, isLeft = true)
+                    handleJoystickDirection(z, rz, isLeft = false)
                     return true
                 }
                 InputMode.SWIPE -> {
-                    // 1. ROBUST AXIS READING: Check standard X/Y, fallback to Z/RZ if they are dead
                     var xAxis = event.getAxisValue(MotionEvent.AXIS_X)
                     var yAxis = event.getAxisValue(MotionEvent.AXIS_Y)
 
-                    if (Math.abs(xAxis) < 0.01f && Math.abs(yAxis) < 0.01f) {
+                    if (abs(xAxis) < 0.01f && abs(yAxis) < 0.01f) {
                         xAxis = event.getAxisValue(MotionEvent.AXIS_Z)
                         yAxis = event.getAxisValue(MotionEvent.AXIS_RZ)
                     }
 
-                    // Apply deadzone to prevent cursor drift
-                    if (Math.abs(xAxis) > 0.1f || Math.abs(yAxis) > 0.1f) {
-
-                        // 2. SLOW DOWN CURSOR: At 120Hz, a speed of 0.5 shoots the cursor out of bounds instantly.
+                    if (abs(xAxis) > 0.1f || abs(yAxis) > 0.1f) {
                         cursorX += xAxis * 0.15f
                         cursorY += yAxis * 0.15f
 
-                        // Clamp to virtual keyboard bounds (0 to 9 on X, 0 to 2 on Y)
                         cursorX = cursorX.coerceIn(0f, 9f)
                         cursorY = cursorY.coerceIn(0f, 2f)
 
                         if (isSwiping) {
-                            // 3. DISTANCE THRESHOLD: Only record points if we've moved a reasonable amount.
-                            // This eliminates micro-jitter and allows the angle math to work properly.
                             val lastPoint = currentSwipePath.lastOrNull()
                             if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.4f) {
                                 currentSwipePath.add(PointF(cursorX, cursorY))
 
-                                // Debug UI: Shows you in real-time that points are being recorded
+                                // --- THE FIX ---
+                                // Calculate the real corners in real-time for the debug view
+                                val smoothed = swipeEngine.smoothPath(currentSwipePath)
+                                val corners = swipeEngine.extractInflectionPoints(smoothed)
+
+                                // Update the debug UI
                                 mainHandler.post {
-                                    tvPredictions.text = "Swiping... [${currentSwipePath.size} pts]"
+                                    swipeDebugView.updatePath(smoothed, corners)
+                                    // Update text to show actual detected corners instead of raw points
+                                    tvPredictions.text = "Swiping... [${corners.size} corners]"
                                 }
                             }
                         }
@@ -161,10 +165,10 @@ class OdinT9Service : InputMethodService() {
         return super.onGenericMotionEvent(event)
     }
 
-    // Add this helper function anywhere in your OdinT9Service class
     private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
-        return Math.sqrt(Math.pow((x2 - p1.x).toDouble(), 2.0) + Math.pow((y2 - p1.y).toDouble(), 2.0)).toFloat()
+        return sqrt((x2 - p1.x).toDouble().pow(2.0) + (y2 - p1.y).toDouble().pow(2.0)).toFloat()
     }
+
     private fun handleJoystickDirection(x: Float, y: Float, isLeft: Boolean): Boolean {
         val mag = sqrt((x * x + y * y).toDouble())
         if (mag < 0.25f) {
@@ -422,6 +426,8 @@ class OdinT9Service : InputMethodService() {
 
     private fun processSwipe() {
         val predictions = swipeEngine.decodeSwipe(currentSwipePath)
+        // Keep the final path on screen for a second so you can see what you just drew
+        // But clear it if you want right away: swipeDebugView.clear()
 
         if (predictions.isNotEmpty()) {
             currentPredictions = predictions

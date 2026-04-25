@@ -127,35 +127,42 @@ class OdinT9Service : InputMethodService() {
                     var xAxis = event.getAxisValue(MotionEvent.AXIS_X)
                     var yAxis = event.getAxisValue(MotionEvent.AXIS_Y)
 
-                    if (abs(xAxis) < 0.01f && abs(yAxis) < 0.01f) {
+                    if (Math.abs(xAxis) < 0.01f && Math.abs(yAxis) < 0.01f) {
                         xAxis = event.getAxisValue(MotionEvent.AXIS_Z)
                         yAxis = event.getAxisValue(MotionEvent.AXIS_RZ)
                     }
 
-                    if (abs(xAxis) > 0.1f || abs(yAxis) > 0.1f) {
-                        cursorX += xAxis * 0.15f
-                        cursorY += yAxis * 0.15f
+                    // --- ABSOLUTE MAPPING ---
+                    // The joystick outputs from -1.0 to 1.0.
+                    // Adding 1.0 makes it 0.0 to 2.0.
+                    // Multiplying X by 4.5 gives us exactly 0.0 to 9.0
+                    // Multiplying Y by 1.0 gives us exactly 0.0 to 2.0
+                    val targetX = ((xAxis + 1.0f) * 4.5f).coerceIn(0f, 9f)
+                    val targetY = ((yAxis + 1.0f) * 1.0f).coerceIn(0f, 2f)
 
-                        cursorX = cursorX.coerceIn(0f, 9f)
-                        cursorY = cursorY.coerceIn(0f, 2f)
+                    cursorX = targetX
+                    cursorY = targetY
 
-                        if (isSwiping) {
-                            val lastPoint = currentSwipePath.lastOrNull()
-                            if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.4f) {
-                                currentSwipePath.add(PointF(cursorX, cursorY))
+                    if (isSwiping) {
+                        val lastPoint = currentSwipePath.lastOrNull()
+                        // Lowered the distance threshold slightly since absolute
+                        // mapping naturally handles stopping without micro-jitter
+                        if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.2f) {
+                            currentSwipePath.add(PointF(cursorX, cursorY))
 
-                                // --- THE FIX ---
-                                // Calculate the real corners in real-time for the debug view
-                                val smoothed = swipeEngine.smoothPath(currentSwipePath)
-                                val corners = swipeEngine.extractInflectionPoints(smoothed)
+                            val smoothed = swipeEngine.smoothPath(currentSwipePath)
+                            val corners = swipeEngine.extractInflectionPoints(smoothed)
 
-                                // Update the debug UI
-                                mainHandler.post {
-                                    swipeDebugView.updatePath(smoothed, corners)
-                                    // Update text to show actual detected corners instead of raw points
-                                    tvPredictions.text = "Swiping... [${corners.size} corners]"
-                                }
+                            mainHandler.post {
+                                swipeDebugView.updatePath(smoothed, corners)
+                                tvPredictions.text = "Swiping... [${corners.size} corners]"
                             }
+                        }
+                    } else {
+                        // Optional: Show a live preview dot of where the joystick is pointing
+                        // BEFORE they press R1 so they know where they are starting.
+                        mainHandler.post {
+                            swipeDebugView.updatePath(listOf(PointF(cursorX, cursorY)), emptyList())
                         }
                     }
                     return true
@@ -426,16 +433,25 @@ class OdinT9Service : InputMethodService() {
 
     private fun processSwipe() {
         val predictions = swipeEngine.decodeSwipe(currentSwipePath)
-        // Keep the final path on screen for a second so you can see what you just drew
-        // But clear it if you want right away: swipeDebugView.clear()
 
         if (predictions.isNotEmpty()) {
-            currentPredictions = predictions
-            predictionIndex = 0
-            updateUI()
+            // Get the absolute best match
+            val bestMatch = predictions.first()
+
+            // Instantly inject it into the text box with a trailing space
+            currentInputConnection?.commitText("$bestMatch ", 1)
+
+            // Keep the UI updated just so the user sees what was chosen
+            // and what the alternative guesses were
+            val alternatives = predictions.take(3).joinToString("   |   ")
+            tvPredictions.text = alternatives
+
         } else {
             tvPredictions.text = "No swipe match"
         }
+
+        // Clear the debug view so it's ready for the next swipe
+        swipeDebugView.clear()
     }
 
     private fun updateUI() {

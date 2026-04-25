@@ -6,6 +6,32 @@
     android:orientation="vertical"
     android:padding="8dp">
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <Button
+            android:id="@+id/btn_toggle_mode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Toggle Mode" />
+        <TextView
+            android:id="@+id/tv_mode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#AAAAAA"
+            android:layout_marginStart="16dp"
+            android:layout_gravity="center_vertical"/>
+    </LinearLayout>
+
+    <com.vazbloke.t9controller.SwipeDebugView
+        android:id="@+id/swipe_debug_view"
+        android:layout_width="match_parent"
+        android:layout_height="120dp" 
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:background="#111111" />
+
     <TextView
         android:id="@+id/tv_predictions"
         android:layout_width="match_parent"

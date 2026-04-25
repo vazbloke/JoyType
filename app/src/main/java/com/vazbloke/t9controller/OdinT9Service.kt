@@ -58,6 +58,10 @@ class OdinT9Service : InputMethodService() {
     private var currentJoyX = 0f
     private var currentJoyY = 0f
 
+    // Real-time smoothed velocity
+    private var smoothedJoyX = 0f
+    private var smoothedJoyY = 0f
+
     /**
      * Maps a circular joystick input [-1, 1] to a square bounding box [-1, 1].
      * This ensures that "riding the gate" produces straight lines.
@@ -168,24 +172,35 @@ class OdinT9Service : InputMethodService() {
                     }
 
                     val mapped = mapCircleToSquare(rawX, rawY)
-
-                    // Always track physical mapped state for the anchor
                     currentJoyX = mapped.x
                     currentJoyY = mapped.y
 
                     if (isSwiping) {
-                        // PHASE 1: DRASTICALLY REDUCED SPEED
-                        // 0.03f means it takes much longer to reach the edges of the box.
-                        // This allows you to draw careful, deliberate shapes.
-                        cursorX += mapped.x * 0.03f
-                        cursorY += mapped.y * 0.03f
+                        // 1. OUTLIER SWALLOWING
+                        // If the joystick value jumps by more than 80% of its total range in a single
+                        // frame (16ms), it's hardware noise. Swallow it by returning early.
+                        val deltaX = Math.abs(mapped.x - smoothedJoyX)
+                        val deltaY = Math.abs(mapped.y - smoothedJoyY)
+                        if (deltaX > 0.8f || deltaY > 0.8f) {
+                            return true
+                        }
+
+                        // 2. THE RUBBER BAND FILTER (Exponential Moving Average)
+                        // The new velocity is 75% of the old velocity, and 25% of the new joystick input.
+                        // This naturally absorbs all high-frequency jitter.
+                        val smoothingFactor = 0.25f
+                        smoothedJoyX = (smoothedJoyX * (1f - smoothingFactor)) + (mapped.x * smoothingFactor)
+                        smoothedJoyY = (smoothedJoyY * (1f - smoothingFactor)) + (mapped.y * smoothingFactor)
+
+                        // Apply the deeply smoothed velocity to the cursor
+                        cursorX += smoothedJoyX * 0.03f
+                        cursorY += smoothedJoyY * 0.03f
 
                         val lastPoint = currentSwipePath.lastOrNull()
-                        // Small threshold to capture a high-resolution raw curve
+
                         if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.05f) {
                             currentSwipePath.add(PointF(cursorX, cursorY))
 
-                            // PHASE 2: CURVE TO POINTS
                             val corners = swipeEngine.extractInflectionPoints(currentSwipePath)
 
                             mainHandler.post {
@@ -307,12 +322,12 @@ class OdinT9Service : InputMethodService() {
                             isSwiping = true
                             currentSwipePath.clear()
 
-                            // Reset cursor to center of the relative canvas
                             cursorX = 0f
                             cursorY = 0f
+                            smoothedJoyX = 0f // Reset filter
+                            smoothedJoyY = 0f // Reset filter
                             currentSwipePath.add(PointF(cursorX, cursorY))
 
-                            // Capture anchor for dictionary filtering
                             anchorJoyX = currentJoyX
                             anchorJoyY = currentJoyY
 

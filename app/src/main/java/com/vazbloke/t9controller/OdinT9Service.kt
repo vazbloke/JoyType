@@ -58,6 +58,35 @@ class OdinT9Service : InputMethodService() {
     private var currentJoyX = 0f
     private var currentJoyY = 0f
 
+    /**
+     * Maps a circular joystick input [-1, 1] to a square bounding box [-1, 1].
+     * This ensures that "riding the gate" produces straight lines.
+     */
+    private fun mapCircleToSquare(u: Float, v: Float): PointF {
+        if (u == 0f && v == 0f) return PointF(0f, 0f)
+
+        // Get the current magnitude of the joystick push
+        val radius = Math.sqrt((u * u + v * v).toDouble()).toFloat()
+        val normalizedRadius = radius.coerceAtMost(1f)
+
+        // Find the angle of the joystick
+        val theta = Math.atan2(v.toDouble(), u.toDouble()).toFloat()
+
+        // Calculate the multiplier needed to stretch this specific angle to the edge of a square
+        val cosTheta = Math.abs(Math.cos(theta.toDouble())).toFloat()
+        val sinTheta = Math.abs(Math.sin(theta.toDouble())).toFloat()
+        val scale = 1f / Math.max(cosTheta, sinTheta)
+
+        // Apply the stretch
+        val mappedRadius = normalizedRadius * scale
+
+        // Convert back to Cartesian coordinates
+        val x = mappedRadius * Math.cos(theta.toDouble()).toFloat()
+        val y = mappedRadius * Math.sin(theta.toDouble()).toFloat()
+
+        return PointF(x.coerceIn(-1f, 1f), y.coerceIn(-1f, 1f))
+    }
+
     override fun onCreateInputView(): View {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)
@@ -130,17 +159,20 @@ class OdinT9Service : InputMethodService() {
                     return true
                 }
                 InputMode.SWIPE -> {
-                    var xAxis = event.getAxisValue(MotionEvent.AXIS_X)
-                    var yAxis = event.getAxisValue(MotionEvent.AXIS_Y)
+                    var rawX = event.getAxisValue(MotionEvent.AXIS_X)
+                    var rawY = event.getAxisValue(MotionEvent.AXIS_Y)
 
-                    if (Math.abs(xAxis) < 0.01f && Math.abs(yAxis) < 0.01f) {
-                        xAxis = event.getAxisValue(MotionEvent.AXIS_Z)
-                        yAxis = event.getAxisValue(MotionEvent.AXIS_RZ)
+                    if (Math.abs(rawX) < 0.01f && Math.abs(rawY) < 0.01f) {
+                        rawX = event.getAxisValue(MotionEvent.AXIS_Z)
+                        rawY = event.getAxisValue(MotionEvent.AXIS_RZ)
                     }
 
-                    // Always track the physical joystick state so it's ready when L1 is pressed
-                    currentJoyX = xAxis
-                    currentJoyY = yAxis
+                    // --- NEW: Map the physical circular input to a virtual square space ---
+                    val squareMappedPoint = mapCircleToSquare(rawX, rawY)
+
+                    // Always track the mapped state so it's ready when L1 is pressed
+                    currentJoyX = squareMappedPoint.x
+                    currentJoyY = squareMappedPoint.y
 
                     if (isSwiping) {
                         // We only care about the shape relative to the start point
@@ -148,6 +180,7 @@ class OdinT9Service : InputMethodService() {
                         val relativeY = currentJoyY - anchorJoyY
 
                         val lastPoint = currentSwipePath.lastOrNull()
+
                         // 0.1f distance threshold to filter out hardware micro-jitter
                         if (lastPoint == null || getDistance(lastPoint, relativeX, relativeY) > 0.1f) {
                             currentSwipePath.add(PointF(relativeX, relativeY))
@@ -157,7 +190,9 @@ class OdinT9Service : InputMethodService() {
 
                             mainHandler.post {
                                 swipeDebugView.updatePath(smoothed, corners)
-                                tvPredictions.text = "Shape Corners: ${corners.size - 2}"
+                                // -2 because we don't count the start and release points as inner corners
+                                val displayCorners = Math.max(0, corners.size - 2)
+                                tvPredictions.text = "Shape Corners: $displayCorners"
                             }
                         }
                     }

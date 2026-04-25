@@ -12,7 +12,7 @@ class SwipeEngine {
         'z' to PointF(1.5f, 2f), 'x' to PointF(2.5f, 2f), 'c' to PointF(3.5f, 2f), 'v' to PointF(4.5f, 2f), 'b' to PointF(5.5f, 2f), 'n' to PointF(6.5f, 2f), 'm' to PointF(7.5f, 2f)
     )
 
-    private val dictionary = listOf("hello", "world", "good", "game", "odin", "test", "help", "rest", "the", "there", "their")
+    private val dictionary = listOf("hello", "world", "good", "game", "odin", "test", "help", "rest", "the", "there", "their", "something")
 
     // Calculates the anchor point on the QWERTY grid based on the joystick's initial tilt (-1 to 1)
     private fun getStartAnchorChars(joystickX: Float, joystickY: Float): Set<Char> {

@@ -132,37 +132,36 @@ class OdinT9Service : InputMethodService() {
                         yAxis = event.getAxisValue(MotionEvent.AXIS_RZ)
                     }
 
-                    // --- ABSOLUTE MAPPING ---
-                    // The joystick outputs from -1.0 to 1.0.
-                    // Adding 1.0 makes it 0.0 to 2.0.
-                    // Multiplying X by 4.5 gives us exactly 0.0 to 9.0
-                    // Multiplying Y by 1.0 gives us exactly 0.0 to 2.0
-                    val targetX = ((xAxis + 1.0f) * 4.5f).coerceIn(0f, 9f)
-                    val targetY = ((yAxis + 1.0f) * 1.0f).coerceIn(0f, 2f)
+                    // --- THE "IN-BETWEEN" MOVEMENT ---
+                    // By multiplying the axis by its own absolute value, we create a curve.
+                    // A 20% tilt results in 4% speed (highly precise).
+                    // A 100% tilt results in 100% speed (very fast).
+                    if (Math.abs(xAxis) > 0.1f || Math.abs(yAxis) > 0.1f) {
+                        val moveX = xAxis * Math.abs(xAxis) * 0.4f
+                        val moveY = yAxis * Math.abs(yAxis) * 0.4f
 
-                    cursorX = targetX
-                    cursorY = targetY
+                        cursorX = (cursorX + moveX).coerceIn(0f, 9f)
+                        cursorY = (cursorY + moveY).coerceIn(0f, 2f)
 
-                    if (isSwiping) {
-                        val lastPoint = currentSwipePath.lastOrNull()
-                        // Lowered the distance threshold slightly since absolute
-                        // mapping naturally handles stopping without micro-jitter
-                        if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.2f) {
-                            currentSwipePath.add(PointF(cursorX, cursorY))
+                        if (isSwiping) {
+                            val lastPoint = currentSwipePath.lastOrNull()
+                            if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.3f) {
+                                currentSwipePath.add(PointF(cursorX, cursorY))
 
-                            val smoothed = swipeEngine.smoothPath(currentSwipePath)
-                            val corners = swipeEngine.extractInflectionPoints(smoothed)
+                                val smoothed = swipeEngine.smoothPath(currentSwipePath)
+                                val corners = swipeEngine.extractInflectionPoints(smoothed)
 
-                            mainHandler.post {
-                                swipeDebugView.updatePath(smoothed, corners)
-                                tvPredictions.text = "Swiping... [${corners.size} corners]"
+                                mainHandler.post {
+                                    swipeDebugView.updatePath(smoothed, corners)
+                                    tvPredictions.text = "Swiping... [${corners.size} corners]"
+                                }
                             }
-                        }
-                    } else {
-                        // Optional: Show a live preview dot of where the joystick is pointing
-                        // BEFORE they press R1 so they know where they are starting.
-                        mainHandler.post {
-                            swipeDebugView.updatePath(listOf(PointF(cursorX, cursorY)), emptyList())
+                        } else {
+                            // Show a live preview dot so you know where your cursor is
+                            // resting BEFORE you press R1 to start swiping.
+                            mainHandler.post {
+                                swipeDebugView.updatePath(listOf(PointF(cursorX, cursorY)), emptyList())
+                            }
                         }
                     }
                     return true

@@ -14,7 +14,7 @@ class SwipeDebugView @JvmOverloads constructor(
 ) : View(context, attrs, defStyleAttr) {
 
     private val pathPaint = Paint().apply {
-        color = Color.parseColor("#4488FF") // Light blue line
+        color = Color.parseColor("#884488FF") // Semi-transparent blue
         style = Paint.Style.STROKE
         strokeWidth = 8f
         isAntiAlias = true
@@ -23,24 +23,32 @@ class SwipeDebugView @JvmOverloads constructor(
     }
 
     private val pointPaint = Paint().apply {
-        color = Color.RED // Red dots for inflection points
+        color = Color.RED
         style = Paint.Style.FILL
         isAntiAlias = true
     }
 
-    private val gridPaint = Paint().apply {
-        color = Color.DKGRAY
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
+    private val textPaint = Paint().apply {
+        color = Color.parseColor("#44FFFFFF") // Faint white for keyboard map
+        textSize = 40f
+        textAlign = Paint.Align.CENTER
+        isAntiAlias = true
     }
 
     private var swipePath = listOf<PointF>()
     private var inflectionPoints = listOf<PointF>()
 
+    // The exact spatial map the algorithm uses
+    private val keyboardLayout = mapOf(
+        'q' to PointF(0f, 0f), 'w' to PointF(1f, 0f), 'e' to PointF(2f, 0f), 'r' to PointF(3f, 0f), 't' to PointF(4f, 0f), 'y' to PointF(5f, 0f), 'u' to PointF(6f, 0f), 'i' to PointF(7f, 0f), 'o' to PointF(8f, 0f), 'p' to PointF(9f, 0f),
+        'a' to PointF(0.5f, 1f), 's' to PointF(1.5f, 1f), 'd' to PointF(2.5f, 1f), 'f' to PointF(3.5f, 1f), 'g' to PointF(4.5f, 1f), 'h' to PointF(5.5f, 1f), 'j' to PointF(6.5f, 1f), 'k' to PointF(7.5f, 1f), 'l' to PointF(8.5f, 1f),
+        'z' to PointF(1.5f, 2f), 'x' to PointF(2.5f, 2f), 'c' to PointF(3.5f, 2f), 'v' to PointF(4.5f, 2f), 'b' to PointF(5.5f, 2f), 'n' to PointF(6.5f, 2f), 'm' to PointF(7.5f, 2f)
+    )
+
     fun updatePath(rawPath: List<PointF>, inflections: List<PointF>) {
         this.swipePath = rawPath
         this.inflectionPoints = inflections
-        invalidate() // Request a redraw
+        invalidate()
     }
 
     fun clear() {
@@ -52,20 +60,20 @@ class SwipeDebugView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        // The virtual grid is X: 0 to 9, Y: 0 to 2
-        // We add a little padding (10f and 3f respectively) so the lines don't clip the edges
         val scaleX = width / 10f
         val scaleY = height / 3f
 
-        // Optional: Draw virtual grid rows for reference
-        for (i in 0..2) {
-            val y = (i + 0.5f) * scaleY
-            canvas.drawLine(0f, y, width.toFloat(), y, gridPaint)
+        // 1. Draw the Keyboard Map
+        for ((char, point) in keyboardLayout) {
+            val screenX = (point.x + 0.5f) * scaleX
+            // Adjust Y slightly so text centers well
+            val screenY = (point.y + 0.5f) * scaleY + (textPaint.textSize / 3)
+            canvas.drawText(char.uppercaseChar().toString(), screenX, screenY, textPaint)
         }
 
         if (swipePath.isEmpty()) return
 
-        // 1. Draw the continuous path
+        // 2. Draw the continuous path
         val drawPath = Path()
         swipePath.forEachIndexed { index, point ->
             val screenX = (point.x + 0.5f) * scaleX
@@ -76,11 +84,11 @@ class SwipeDebugView @JvmOverloads constructor(
         }
         canvas.drawPath(drawPath, pathPaint)
 
-        // 2. Draw the inflection points (corners)
+        // 3. Draw the inflection points
         for (point in inflectionPoints) {
             val screenX = (point.x + 0.5f) * scaleX
             val screenY = (point.y + 0.5f) * scaleY
-            canvas.drawCircle(screenX, screenY, 15f, pointPaint)
+            canvas.drawCircle(screenX, screenY, 12f, pointPaint)
         }
     }
 }

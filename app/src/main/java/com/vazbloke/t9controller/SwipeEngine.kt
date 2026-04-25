@@ -85,15 +85,14 @@ class SwipeEngine {
     }
 
     // #FIXME This should be private. Currently hacked just to get it working
-    public fun extractInflectionPoints(path: List<PointF>): List<PointF> {
+    fun extractInflectionPoints(path: List<PointF>): List<PointF> {
         val points = mutableListOf<PointF>()
         points.add(path.first())
 
         var lastInflectionIndex = 0
 
-        // "step = 2" means we look slightly behind and ahead of the current point.
-        // This calculates the "macro" vector, completely ignoring gentle U-turns.
-        val step = 2
+        // INCREASED STEP: Looks further ahead to ignore circular joystick arcs
+        val step = 3
 
         for (i in step until path.size - step) {
             val prev = path[i - step]
@@ -109,22 +108,19 @@ class SwipeEngine {
             val mag1 = sqrt(v1x*v1x + v1y*v1y)
             val mag2 = sqrt(v2x*v2x + v2y*v2y)
 
-            // Ensure vectors have length to avoid division by zero
             if (mag1 > 0.1f && mag2 > 0.1f) {
-                // Coerce ensures floating point imprecision doesn't crash acos()
                 val cosTheta = (dotProduct / (mag1 * mag2)).coerceIn(-1.0f, 1.0f)
                 val angle = acos(cosTheta)
 
-                // Threshold: ~60 degrees (1.0 radians).
-                // We also require the new point to be at least 'step' distance away from the last one to prevent clustering.
-                if (angle > 1.0f && (i - lastInflectionIndex) > step) {
+                // STRICTER ANGLE: ~75 degrees (1.3 radians).
+                // It must be a sharp turn, not just a wobbly line.
+                if (angle > 1.3f && (i - lastInflectionIndex) > step) {
                     points.add(curr)
                     lastInflectionIndex = i
                 }
             }
         }
 
-        // Always include the release point
         if (points.last() != path.last()) {
             points.add(path.last())
         }

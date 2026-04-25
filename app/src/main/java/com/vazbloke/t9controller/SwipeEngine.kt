@@ -29,27 +29,6 @@ class SwipeEngine {
             .toSet()
     }
 
-    fun decodeSwipe(rawPath: List<PointF>, startJoyX: Float, startJoyY: Float): List<String> {
-        val startChars = getStartAnchorChars(startJoyX, startJoyY)
-
-        // Handle micro-swipes (just tapping L1 on a letter)
-        if (rawPath.size < 3) {
-            return dictionary.filter { startChars.contains(it.first()) && it.length == 1 }
-        }
-
-        val smoothed = smoothPath(rawPath)
-        val inflections = extractInflectionPoints(smoothed)
-        val userAngles = calculateAngles(inflections)
-
-        // Score words based on how closely their angle sequences match the user's
-        return dictionary
-            .filter { startChars.contains(it.first()) }
-            .map { word -> word to scoreWordShape(word, userAngles) }
-            .filter { it.second < 2.5f } // Threshold: discard terrible matches
-            .sortedBy { it.second }      // Lowest score is the best match
-            .map { it.first }
-    }
-
     private fun scoreWordShape(word: String, userAngles: List<Float>): Float {
         // Remove consecutive duplicate letters ("hello" -> "helo") because
         // you don't draw a corner for double letters.
@@ -110,52 +89,87 @@ class SwipeEngine {
         return abs(diff)
     }
 
-    // (Keep your existing smoothPath and extractInflectionPoints functions here)
-    fun smoothPath(path: List<PointF>): List<PointF> {
-        if (path.size < 3) return path
-        val smoothed = mutableListOf<PointF>()
-        smoothed.add(path.first())
-        for (i in 1 until path.size - 1) {
-            val avgX = (path[i-1].x + path[i].x + path[i+1].x) / 3f
-            val avgY = (path[i-1].y + path[i].y + path[i+1].y) / 3f
-            smoothed.add(PointF(avgX, avgY))
+    fun decodeSwipe(rawPath: List<PointF>, startJoyX: Float, startJoyY: Float): List<String> {
+        val startChars = getStartAnchorChars(startJoyX, startJoyY)
+
+        // Handle micro-swipes (just tapping L1 on a letter)
+        if (rawPath.size < 3) {
+            return dictionary.filter { startChars.contains(it.first()) && it.length == 1 }
         }
-        smoothed.add(path.last())
-        return smoothed
+
+        // NO MORE SMOOTHING! RDP handles noise and geometry automatically.
+        val inflections = extractInflectionPoints(rawPath)
+        val userAngles = calculateAngles(inflections)
+
+        // Score words based on how closely their angle sequences match the user's
+        return dictionary
+            .filter { startChars.contains(it.first()) }
+            .map { word -> word to scoreWordShape(word, userAngles) }
+            .filter { it.second < 2.5f } // Threshold: discard terrible matches
+            .sortedBy { it.second }      // Lowest score is the best match
+            .map { it.first }
     }
 
     fun extractInflectionPoints(path: List<PointF>): List<PointF> {
-        val points = mutableListOf<PointF>()
-        points.add(path.first())
-        var lastInflectionIndex = 0
-        val step = 3
+        // 0.25f is the geometric strictness (epsilon).
+        // Higher ignores more wobbles, lower catches tinier corners.
+        return rdp(path, 0.25f)
+    }
 
-        for (i in step until path.size - step) {
-            val prev = path[i - step]
-            val curr = path[i]
-            val next = path[i + step]
+    // --- Ramer-Douglas-Peucker Algorithm ---
+    private fun rdp(points: List<PointF>, epsilon: Float): List<PointF> {
+        if (points.size < 3) return points
 
-            val v1x = curr.x - prev.x
-            val v1y = curr.y - prev.y
-            val v2x = next.x - curr.x
-            val v2y = next.y - curr.y
+        var dmax = 0f
+        var index = 0
+        val end = points.size - 1
 
-            val dotProduct = (v1x * v2x) + (v1y * v2y)
-            val mag1 = sqrt(v1x*v1x + v1y*v1y)
-            val mag2 = sqrt(v2x*v2x + v2y*v2y)
+        val startPt = points[0]
+        val endPt = points[end]
 
-            if (mag1 > 0.1f && mag2 > 0.1f) {
-                val cosTheta = (dotProduct / (mag1 * mag2)).coerceIn(-1.0f, 1.0f)
-                val angle = acos(cosTheta)
-
-                if (angle > 1.3f && (i - lastInflectionIndex) > step) {
-                    points.add(curr)
-                    lastInflectionIndex = i
-                }
+        for (i in 1 until end) {
+            val d = perpendicularDistance(points[i], startPt, endPt)
+            if (d > dmax) {
+                index = i
+                dmax = d
             }
         }
-        if (points.last() != path.last()) points.add(path.last())
-        return points
+
+        return if (dmax > epsilon) {
+            val recResults1 = rdp(points.subList(0, index + 1), epsilon)
+            val recResults2 = rdp(points.subList(index, end + 1), epsilon)
+
+            val result = mutableListOf<PointF>()
+            result.addAll(recResults1.dropLast(1))
+            result.addAll(recResults2)
+            result
+        } else {
+            listOf(startPt, endPt)
+        }
+    }
+
+    private fun perpendicularDistance(pt: PointF, lineStart: PointF, lineEnd: PointF): Float {
+        var dx = lineEnd.x - lineStart.x
+        var dy = lineEnd.y - lineStart.y
+        val mag = sqrt(dx * dx + dy * dy)
+
+        // If the line is just a point, return the standard distance
+        if (mag == 0f) {
+            return sqrt((pt.x - lineStart.x).pow(2) + (pt.y - lineStart.y).pow(2))
+        }
+
+        dx /= mag
+        dy /= mag
+
+        val pvx = pt.x - lineStart.x
+        val pvy = pt.y - lineStart.y
+
+        val pvdot = pvx * dx + pvy * dy
+
+        val ax = pvx - pvdot * dx
+        val ay = pvy - pvdot * dy
+
+        return sqrt(ax * ax + ay * ay)
     }
 
     private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {

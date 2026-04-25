@@ -184,15 +184,19 @@ class OdinT9Service : InputMethodService() {
                         // 0.1f distance threshold to filter out hardware micro-jitter
                         if (lastPoint == null || getDistance(lastPoint, relativeX, relativeY) > 0.1f) {
                             currentSwipePath.add(PointF(relativeX, relativeY))
+// 0.1f distance threshold to filter out hardware micro-jitter
+                            if (lastPoint == null || getDistance(lastPoint, relativeX, relativeY) > 0.1f) {
+                                currentSwipePath.add(PointF(relativeX, relativeY))
 
-                            val smoothed = swipeEngine.smoothPath(currentSwipePath)
-                            val corners = swipeEngine.extractInflectionPoints(smoothed)
+                                // Removed smoothed path. Pass raw path directly to RDP.
+                                val corners = swipeEngine.extractInflectionPoints(currentSwipePath)
 
-                            mainHandler.post {
-                                swipeDebugView.updatePath(smoothed, corners)
-                                // -2 because we don't count the start and release points as inner corners
-                                val displayCorners = Math.max(0, corners.size - 2)
-                                tvPredictions.text = "Shape Corners: $displayCorners"
+                                mainHandler.post {
+                                    // Draw the raw path and the mathematically extracted corners
+                                    swipeDebugView.updatePath(currentSwipePath, corners)
+                                    val displayCorners = Math.max(0, corners.size - 2)
+                                    tvPredictions.text = "Shape Corners: $displayCorners"
+                                }
                             }
                         }
                     }

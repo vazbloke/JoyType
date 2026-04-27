@@ -1,33 +1,67 @@
 package com.vazbloke.t9controller
 
+import android.content.Context
+import java.io.BufferedReader
+import java.io.InputStreamReader
+
 class T9Engine {
-    private val dictionary = mapOf(
-        "2" to listOf("a", "b", "c"),
-        "3" to listOf("d", "e", "f"),
-        "4" to listOf("g", "h", "i"),
-        "5" to listOf("j", "k", "l"),
-        "6" to listOf("m", "n", "o"),
-        "7" to listOf("p", "q", "r", "s"),
-        "8" to listOf("t", "u", "v"),
-        "9" to listOf("w", "x", "y", "z"),
-        "hello" to listOf("hello"),
-        "43556" to listOf("hello")
+    private val charToDigit = mapOf(
+        'a' to '2', 'b' to '2', 'c' to '2',
+        'd' to '3', 'e' to '3', 'f' to '3',
+        'g' to '4', 'h' to '4', 'i' to '4',
+        'j' to '5', 'k' to '5', 'l' to '5',
+        'm' to '6', 'n' to '6', 'o' to '6',
+        'p' to '7', 'q' to '7', 'r' to '7', 's' to '7',
+        't' to '8', 'u' to '8', 'v' to '8',
+        'w' to '9', 'x' to '9', 'y' to '9', 'z' to '9'
     )
 
-    // A very basic T9 implementation for demonstration/fix purposes.
-    // In a real app, this would use a large dictionary and prefix tree.
-    fun getPredictions(sequence: String): List<String> {
-        if (sequence.isEmpty()) return emptyList()
+    private val dictionary = mutableMapOf<String, MutableList<Pair<String, Int>>>()
+    private var allWordsList = listOf<String>()
 
-        // Simple hardcoded examples for common sequences
-        return when (sequence) {
-            "43556" -> listOf("hello")
-            "96753" -> listOf("world")
-            "8378" -> listOf("test")
-            else -> {
-                // Generate a "raw" numeric string as fallback if nothing found
-                listOf(sequence)
+    fun loadDictionary(context: Context) {
+        try {
+            val inputStream = context.assets.open("en.csv")
+            val reader = BufferedReader(InputStreamReader(inputStream))
+            val tempAllWords = mutableListOf<String>()
+
+            reader.forEachLine { line ->
+                val parts = line.split("\t")
+                if (parts.isNotEmpty()) {
+                    val word = parts[0].lowercase()
+                    if (word.all { it in 'a'..'z' }) {
+                        val freq = if (parts.size > 1) parts[1].toIntOrNull() ?: 0 else 0
+                        val sequence = wordToSequence(word)
+                        
+                        if (!dictionary.containsKey(sequence)) {
+                            dictionary[sequence] = mutableListOf()
+                        }
+                        dictionary[sequence]?.add(word to freq)
+                        tempAllWords.add(word)
+                    }
+                }
             }
+            
+            // Sort each sequence group by frequency (descending)
+            dictionary.forEach { (_, words) ->
+                words.sortByDescending { it.second }
+            }
+            
+            allWordsList = tempAllWords
+            inputStream.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
+
+    private fun wordToSequence(word: String): String {
+        return word.map { charToDigit[it] ?: '0' }.joinToString("")
+    }
+
+    fun getPredictions(sequence: String): List<String> {
+        if (sequence.isEmpty()) return emptyList()
+        return dictionary[sequence]?.map { it.first } ?: listOf(sequence)
+    }
+
+    fun getAllWords(): List<String> = allWordsList
 }

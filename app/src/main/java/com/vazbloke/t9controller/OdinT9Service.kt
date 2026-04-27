@@ -91,6 +91,13 @@ class OdinT9Service : InputMethodService() {
         return PointF(x.coerceIn(-1f, 1f), y.coerceIn(-1f, 1f))
     }
 
+
+    override fun onCreate() {
+        super.onCreate()
+        t9Engine.loadDictionary(this)
+        swipeEngine.dictionary = t9Engine.getAllWords()
+    }
+
     override fun onCreateInputView(): View {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)

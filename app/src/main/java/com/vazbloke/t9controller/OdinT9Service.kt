@@ -4,6 +4,7 @@ import android.graphics.PointF
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
+import android.text.Html
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -19,14 +20,16 @@ class OdinT9Service : InputMethodService() {
 
     private lateinit var tvPredictions: TextView
     private lateinit var tvMode: TextView
+    private lateinit var swipeDebugView: SwipeDebugView
     private val t9Engine = T9Engine()
     private val swipeEngine = SwipeEngine()
 
     enum class InputMode {
-        LJOY_RBUTTONS, JOY_JOY, SWIPE
+        LJOY_RBUTTONS, JOY_JOY, SWIPE, TEACH
     }
 
     private var currentMode = InputMode.LJOY_RBUTTONS
+    private var preTeachMode = InputMode.LJOY_RBUTTONS
     private var currentSequence = ""
     private var currentPredictions = listOf<String>()
     private var predictionIndex = 0
@@ -39,58 +42,40 @@ class OdinT9Service : InputMethodService() {
     private var digitalL2Down = false
     private var analogR2Down = false
     private var digitalR2Down = false
-
     private val mainHandler = Handler(Looper.getMainLooper())
     private var backspaceRepeatRunnable: Runnable? = null
 
-    // Swipe State
     private var isSwiping = false
     private var cursorX = 4.5f
     private var cursorY = 1.0f
-    private val cursorSpeed = 0.5f
     private val currentSwipePath = mutableListOf<PointF>()
-
-    private lateinit var swipeDebugView: SwipeDebugView
-
-    // New State Variables for Swipe Anchor
     private var anchorJoyX = 0f
     private var anchorJoyY = 0f
     private var currentJoyX = 0f
     private var currentJoyY = 0f
-
-    // Real-time smoothed velocity
     private var smoothedJoyX = 0f
     private var smoothedJoyY = 0f
 
-    /**
-     * Maps a circular joystick input [-1, 1] to a square bounding box [-1, 1].
-     * This ensures that "riding the gate" produces straight lines.
-     */
+    private var teachResolvedChars = charArrayOf()
+    private var teachCurrentIndex = 0
+
     private fun mapCircleToSquare(u: Float, v: Float): PointF {
         if (u == 0f && v == 0f) return PointF(0f, 0f)
-
-        // Get the current magnitude of the joystick push
-        val radius = Math.sqrt((u * u + v * v).toDouble()).toFloat()
+        val radius = sqrt((u * u + v * v).toDouble()).toFloat()
         val normalizedRadius = radius.coerceAtMost(1f)
-
-        // Find the angle of the joystick
-        val theta = Math.atan2(v.toDouble(), u.toDouble()).toFloat()
-
-        // Calculate the multiplier needed to stretch this specific angle to the edge of a square
-        val cosTheta = Math.abs(Math.cos(theta.toDouble())).toFloat()
-        val sinTheta = Math.abs(Math.sin(theta.toDouble())).toFloat()
-        val scale = 1f / Math.max(cosTheta, sinTheta)
-
-        // Apply the stretch
+        val theta = atan2(v.toDouble(), u.toDouble()).toFloat()
+        val cosTheta = abs(Math.cos(theta.toDouble())).toFloat()
+        val sinTheta = abs(Math.sin(theta.toDouble())).toFloat()
+        val scale = 1f / max(cosTheta, sinTheta)
         val mappedRadius = normalizedRadius * scale
-
-        // Convert back to Cartesian coordinates
         val x = mappedRadius * Math.cos(theta.toDouble()).toFloat()
         val y = mappedRadius * Math.sin(theta.toDouble()).toFloat()
-
         return PointF(x.coerceIn(-1f, 1f), y.coerceIn(-1f, 1f))
     }
 
+    private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
+        return sqrt((x2 - p1.x).toDouble().pow(2.0) + (y2 - p1.y).toDouble().pow(2.0)).toFloat()
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -117,6 +102,7 @@ class OdinT9Service : InputMethodService() {
             InputMode.LJOY_RBUTTONS -> InputMode.JOY_JOY
             InputMode.JOY_JOY -> InputMode.SWIPE
             InputMode.SWIPE -> InputMode.LJOY_RBUTTONS
+            InputMode.TEACH -> InputMode.LJOY_RBUTTONS
         }
         currentSequence = ""
         updatePredictions()
@@ -129,9 +115,17 @@ class OdinT9Service : InputMethodService() {
             InputMode.LJOY_RBUTTONS -> "Mode: LJoy RButtons"
             InputMode.JOY_JOY -> "Mode: Joy Joy"
             InputMode.SWIPE -> "Mode: Swipe"
+            InputMode.TEACH -> "Mode: Teach (M2 to Save)"
         }
+
+        // HIDE THE CANVAS unless we are explicitly in SWIPE mode
         if (currentMode == InputMode.SWIPE) {
-            tvPredictions.text = "Hold L1 to Swipe"
+            swipeDebugView.visibility = View.VISIBLE
+            if (currentSwipePath.isEmpty()) {
+                tvPredictions.text = "Hold L1 to Swipe"
+            }
+        } else {
+            swipeDebugView.visibility = View.GONE
         }
     }
 
@@ -153,9 +147,9 @@ class OdinT9Service : InputMethodService() {
                 InputMode.LJOY_RBUTTONS -> {
                     val yAxis = event.getAxisValue(MotionEvent.AXIS_Y)
                     currentJoystickRow = when {
-                        yAxis < -0.5f -> 0 // Up
-                        yAxis > 0.5f -> 2  // Down
-                        else -> 1          // Center
+                        yAxis < -0.5f -> 0
+                        yAxis > 0.5f -> 2
+                        else -> 1
                     }
                     return true
                 }
@@ -173,18 +167,16 @@ class OdinT9Service : InputMethodService() {
                     var rawX = event.getAxisValue(MotionEvent.AXIS_X)
                     var rawY = event.getAxisValue(MotionEvent.AXIS_Y)
 
-                    if (Math.abs(rawX) < 0.01f && Math.abs(rawY) < 0.01f) {
+                    if (abs(rawX) < 0.01f && abs(rawY) < 0.01f) {
                         rawX = event.getAxisValue(MotionEvent.AXIS_Z)
                         rawY = event.getAxisValue(MotionEvent.AXIS_RZ)
                     }
 
                     val mapped = mapCircleToSquare(rawX, rawY)
 
-                    // 1. OUTLIER SWALLOWING
-                    val deltaX = Math.abs(mapped.x - currentJoyX)
-                    val deltaY = Math.abs(mapped.y - currentJoyY)
+                    val deltaX = abs(mapped.x - currentJoyX)
+                    val deltaY = abs(mapped.y - currentJoyY)
                     if (deltaX > 0.8f || deltaY > 0.8f) {
-                        // It's a massive hardware glitch warp. Ignore it this frame.
                         currentJoyX = mapped.x
                         currentJoyY = mapped.y
                         return true
@@ -193,23 +185,15 @@ class OdinT9Service : InputMethodService() {
                     currentJoyX = mapped.x
                     currentJoyY = mapped.y
 
-                    // 2. ABSOLUTE RUBBER BAND FILTER
-                    // Instead of adding to a speed, we interpolate the absolute position.
-                    // 0.3f means the cursor moves 30% of the distance to the joystick's actual position per frame.
-                    // It smoothly glides to the target and STOPS when it gets there.
                     val smoothingFactor = 0.3f
                     smoothedJoyX = (smoothedJoyX * (1f - smoothingFactor)) + (mapped.x * smoothingFactor)
                     smoothedJoyY = (smoothedJoyY * (1f - smoothingFactor)) + (mapped.y * smoothingFactor)
 
                     if (isSwiping) {
-                        // The cursor IS the smoothed absolute coordinate [-1.0 to 1.0]
                         cursorX = smoothedJoyX
                         cursorY = smoothedJoyY
 
                         val lastPoint = currentSwipePath.lastOrNull()
-
-                        // We still need a small distance threshold (0.02f) so we don't
-                        // record 10,000 overlapping points while you hold the stick still.
                         if (lastPoint == null || getDistance(lastPoint, cursorX, cursorY) > 0.02f) {
                             currentSwipePath.add(PointF(cursorX, cursorY))
 
@@ -217,25 +201,22 @@ class OdinT9Service : InputMethodService() {
 
                             mainHandler.post {
                                 swipeDebugView.updatePath(currentSwipePath, corners)
-                                val displayCorners = Math.max(0, corners.size - 2)
+                                val displayCorners = max(0, corners.size - 2)
                                 tvPredictions.text = "Shape Corners: $displayCorners"
                             }
                         }
                     } else {
-                        // Keep the smoothed variables updated even when not swiping,
-                        // so it doesn't "jump" the moment you press L1.
                         smoothedJoyX = mapped.x
                         smoothedJoyY = mapped.y
                     }
                     return true
                 }
+                InputMode.TEACH -> {
+                    return true
+                }
             }
         }
         return super.onGenericMotionEvent(event)
-    }
-
-    private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
-        return sqrt((x2 - p1.x).toDouble().pow(2.0) + (y2 - p1.y).toDouble().pow(2.0)).toFloat()
     }
 
     private fun handleJoystickDirection(x: Float, y: Float, isLeft: Boolean): Boolean {
@@ -281,7 +262,17 @@ class OdinT9Service : InputMethodService() {
         val isRepeat = event.repeatCount > 0
 
         if (keyCode == KeyEvent.KEYCODE_BUTTON_C || keyCode == 188) {
-            requestHideSelf(0)
+            if (!isRepeat && currentMode == InputMode.JOY_JOY) {
+                currentSequence += "5"
+                updatePredictions()
+            }
+            return true
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_Z || keyCode == 189) {
+            if (!isRepeat) {
+                handleTeachModeToggle()
+            }
             return true
         }
 
@@ -337,25 +328,30 @@ class OdinT9Service : InputMethodService() {
                         if (!isRepeat && !isSwiping) {
                             isSwiping = true
                             currentSwipePath.clear()
-
-                            // Start exactly where the smoothed joystick currently is
                             cursorX = smoothedJoyX
                             cursorY = smoothedJoyY
                             currentSwipePath.add(PointF(cursorX, cursorY))
-
-                            // Capture anchor for dictionary filtering
                             anchorJoyX = cursorX
                             anchorJoyY = cursorY
-
                             tvPredictions.text = "Recording Shape..."
                         }
                     }
-
                     KeyEvent.KEYCODE_BUTTON_X -> if (!isRepeat) cyclePrediction(-1)
                     KeyEvent.KEYCODE_BUTTON_A -> if (!isRepeat) cyclePrediction(1)
                     KeyEvent.KEYCODE_BUTTON_B -> if (!isRepeat) commitCurrentWord(" ")
                     KeyEvent.KEYCODE_DPAD_LEFT -> handleCursorMove(KeyEvent.KEYCODE_DPAD_LEFT)
                     KeyEvent.KEYCODE_DPAD_RIGHT -> handleCursorMove(KeyEvent.KEYCODE_DPAD_RIGHT)
+                    else -> handled = false
+                }
+            }
+            InputMode.TEACH -> {
+                when (keyCode) {
+                    KeyEvent.KEYCODE_BUTTON_X -> if (!isRepeat) resolveTeachChar(0)
+                    KeyEvent.KEYCODE_BUTTON_A -> if (!isRepeat) resolveTeachChar(1)
+                    KeyEvent.KEYCODE_BUTTON_B -> if (!isRepeat) resolveTeachChar(2)
+                    KeyEvent.KEYCODE_BUTTON_Y -> if (!isRepeat) resolveTeachChar(3)
+                    KeyEvent.KEYCODE_DPAD_LEFT -> if (!isRepeat) shiftTeachCursor(-1)
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> if (!isRepeat) shiftTeachCursor(1)
                     else -> handled = false
                 }
             }
@@ -379,7 +375,6 @@ class OdinT9Service : InputMethodService() {
             return true
         }
 
-        // CHANGED TO L1
         if (currentMode == InputMode.SWIPE && keyCode == KeyEvent.KEYCODE_BUTTON_L1) {
             if (isSwiping) {
                 isSwiping = false
@@ -433,6 +428,79 @@ class OdinT9Service : InputMethodService() {
         backspaceRepeatRunnable = null
     }
 
+    private fun handleTeachModeToggle() {
+        if (currentMode != InputMode.TEACH) {
+            if (currentSequence.isEmpty()) return
+
+            preTeachMode = currentMode
+            currentMode = InputMode.TEACH
+
+            // Generate a blank slate of ? corresponding to sequence length
+            teachResolvedChars = CharArray(currentSequence.length) { '?' }
+
+            // Explicitly start at index 0 every time
+            teachCurrentIndex = 0
+
+            updateTeachUI()
+            updateModeUI() // To toggle canvas off if entering from Swipe Mode
+        } else {
+            val finalWord = String(teachResolvedChars).replace('?', ' ').trim()
+            if (finalWord.isNotEmpty() && !finalWord.contains('?')) {
+                t9Engine.addCustomWord(finalWord)
+                val ic = currentInputConnection
+                ic?.commitText("$finalWord ", 1)
+            }
+            currentSequence = ""
+            currentMode = preTeachMode
+            updatePredictions()
+            updateModeUI()
+        }
+    }
+
+    private fun resolveTeachChar(buttonIndex: Int) {
+        if (teachCurrentIndex >= currentSequence.length) return
+        val digit = currentSequence[teachCurrentIndex]
+        val availableChars = t9Engine.getCharsForDigit(digit)
+
+        if (buttonIndex < availableChars.size) {
+            teachResolvedChars[teachCurrentIndex] = availableChars[buttonIndex]
+            if (teachCurrentIndex < currentSequence.length - 1) {
+                teachCurrentIndex++
+            }
+            updateTeachUI()
+        }
+    }
+
+    private fun shiftTeachCursor(direction: Int) {
+        teachCurrentIndex = (teachCurrentIndex + direction).coerceIn(0, currentSequence.length - 1)
+        updateTeachUI()
+    }
+
+    private fun updateTeachUI() {
+        val displayWord = StringBuilder()
+        for (i in teachResolvedChars.indices) {
+            val c = teachResolvedChars[i].uppercaseChar()
+            if (i == teachCurrentIndex) {
+                displayWord.append("<b><font color='#4488FF'>[ $c ]</font></b>")
+            } else {
+                displayWord.append("$c ")
+            }
+        }
+
+        val currentDigit = currentSequence[teachCurrentIndex]
+        val chars = t9Engine.getCharsForDigit(currentDigit)
+
+        val hintString = buildString {
+            if (chars.isNotEmpty()) append("X=${chars[0].uppercaseChar()}   ")
+            if (chars.size > 1) append("A=${chars[1].uppercaseChar()}   ")
+            if (chars.size > 2) append("B=${chars[2].uppercaseChar()}   ")
+            if (chars.size > 3) append("Y=${chars[3].uppercaseChar()}")
+        }
+
+        val finalDisplay = "${displayWord.toString().trim()}<br><small><font color='#AAAAAA'>$hintString</font></small>"
+        tvPredictions.text = Html.fromHtml(finalDisplay, Html.FROM_HTML_MODE_LEGACY)
+    }
+
     private fun handleGridInput(column: Int) {
         val digit = (currentJoystickRow * 3) + column + 1
         currentSequence += digit.toString()
@@ -465,7 +533,6 @@ class OdinT9Service : InputMethodService() {
         if (currentSequence.isNotEmpty()) {
             commitCurrentWord("")
         }
-
         val ic = currentInputConnection ?: return
         ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
         ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
@@ -484,7 +551,6 @@ class OdinT9Service : InputMethodService() {
         if (currentSequence.isNotEmpty()) {
             commitCurrentWord("")
         }
-
         val ic = currentInputConnection ?: return
         ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, dpadKeyCode))
         ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, dpadKeyCode))
@@ -494,7 +560,7 @@ class OdinT9Service : InputMethodService() {
         if (currentSequence.isEmpty()) {
             currentPredictions = emptyList()
             predictionIndex = 0
-            if (currentMode != InputMode.SWIPE) {
+            if (currentMode != InputMode.SWIPE && currentMode != InputMode.TEACH) {
                 tvPredictions.text = "Odin T9 Ready"
             }
             return
@@ -503,6 +569,26 @@ class OdinT9Service : InputMethodService() {
         currentPredictions = t9Engine.getPredictions(currentSequence)
         predictionIndex = 0
         updateUI()
+    }
+
+    private fun updateUI() {
+        if (currentPredictions.isEmpty()) {
+            if (currentMode == InputMode.SWIPE && currentSwipePath.isEmpty()) {
+                tvPredictions.text = "Hold L1 to Swipe"
+            } else if (currentSequence.isNotEmpty()) {
+                // If there's no match, display purely grey question marks corresponding to the length
+                val questionMarks = "?".repeat(currentSequence.length)
+                val htmlDisplay = "<font color='#666666'>$questionMarks</font>"
+                tvPredictions.text = Html.fromHtml(htmlDisplay, Html.FROM_HTML_MODE_LEGACY)
+            }
+            return
+        }
+
+        val display = currentPredictions.mapIndexed { index, word ->
+            if (index == predictionIndex) "[$word]" else word
+        }.joinToString("   ")
+
+        tvPredictions.text = display
     }
 
     private fun processSwipe() {
@@ -518,22 +604,5 @@ class OdinT9Service : InputMethodService() {
             tvPredictions.text = "No swipe match"
         }
         swipeDebugView.clear()
-    }
-
-    private fun updateUI() {
-        if (currentPredictions.isEmpty()) {
-            if (currentMode == InputMode.SWIPE && currentSwipePath.isEmpty()) {
-                 tvPredictions.text = "Hold L1 to Swipe"
-            } else if (currentSequence.isNotEmpty()) {
-                tvPredictions.text = "No match: $currentSequence"
-            }
-            return
-        }
-
-        val display = currentPredictions.mapIndexed { index, word ->
-            if (index == predictionIndex) "[$word]" else word
-        }.joinToString("   ")
-
-        tvPredictions.text = display
     }
 }

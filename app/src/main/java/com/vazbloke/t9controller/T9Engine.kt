@@ -5,19 +5,15 @@ import android.os.Environment
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import kotlin.math.log
+
+class TrieNode(
+    var isWord: Boolean = false,
+    var frequency: Int = 0,
+    val children: MutableMap<Char, TrieNode> = mutableMapOf()
+)
 
 class T9Engine {
-    private val charToDigit = mapOf(
-        'a' to '2', 'b' to '2', 'c' to '2',
-        'd' to '3', 'e' to '3', 'f' to '3',
-        'g' to '4', 'h' to '4', 'i' to '4',
-        'j' to '5', 'k' to '5', 'l' to '5',
-        'm' to '6', 'n' to '6', 'o' to '6',
-        'p' to '7', 'q' to '7', 'r' to '7', 's' to '7',
-        't' to '8', 'u' to '8', 'v' to '8',
-        'w' to '9', 'x' to '9', 'y' to '9', 'z' to '9'
-    )
-
     private val digitToChars = mapOf(
         '2' to listOf('a', 'b', 'c'),
         '3' to listOf('d', 'e', 'f'),
@@ -29,24 +25,11 @@ class T9Engine {
         '9' to listOf('w', 'x', 'y', 'z')
     )
 
-    private val dictionary = mutableMapOf<String, MutableList<Pair<String, Int>>>()
-    private val customDictionary = mutableMapOf<String, MutableList<Pair<String, Int>>>()
-    private var allWordsList = listOf<String>()
-
-    // Locates or creates the T9Controller folder in the user's Downloads directory
-    private fun getCustomDictFile(): File {
-        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val t9Dir = File(downloadsDir, "T9Controller")
-        if (!t9Dir.exists()) {
-            t9Dir.mkdirs()
-        }
-        return File(t9Dir, "customdictionary.csv")
-    }
+    private val root = TrieNode()
+    private var allWordsList = mutableListOf<String>()
 
     fun loadDictionary(context: Context) {
-        val tempAllWords = mutableListOf<String>()
-
-        // 1. Load the Base Dictionary (en.csv)
+        // 1. Load Base Dictionary
         try {
             val inputStream = context.assets.open("en.csv")
             val reader = BufferedReader(InputStreamReader(inputStream))
@@ -56,84 +39,110 @@ class T9Engine {
                     val word = parts[0].lowercase()
                     if (word.all { it in 'a'..'z' }) {
                         val freq = if (parts.size > 1) parts[1].toIntOrNull() ?: 0 else 0
-                        val sequence = wordToSequence(word)
-
-                        if (!dictionary.containsKey(sequence)) {
-                            dictionary[sequence] = mutableListOf()
-                        }
-                        dictionary[sequence]?.add(word to freq)
-                        tempAllWords.add(word)
+                        insertWord(word, freq)
+                        allWordsList.add(word)
                     }
                 }
             }
-            dictionary.forEach { (_, words) -> words.sortByDescending { it.second } }
             inputStream.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) { e.printStackTrace() }
 
-        // 2. Load the Custom User Dictionary from Downloads
+        // 2. Load Custom Dictionary
         try {
             val customFile = getCustomDictFile()
             if (customFile.exists()) {
                 customFile.forEachLine { line ->
-                    val parts = line.split("\t", ",") // Supports both tab and comma formats
+                    val parts = line.split("\t", ",")
                     if (parts.isNotEmpty()) {
                         val word = parts[0].trim().lowercase()
                         if (word.isNotEmpty() && word.all { it in 'a'..'z' }) {
-                            addCustomWordToMemory(word)
-                            tempAllWords.add(word)
+                            insertWord(word, 999999)
+                            allWordsList.add(word)
                         }
                     }
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        allWordsList = tempAllWords
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
-    private fun wordToSequence(word: String): String {
+    private fun insertWord(word: String, frequency: Int) {
+        var current = root
+        for (char in word) {
+            if (!current.children.containsKey(char)) {
+                current.children[char] = TrieNode()
+            }
+            current = current.children[char]!!
+        }
+        current.isWord = true
+        current.frequency = maxOf(current.frequency, frequency)
+    }
+
+    /**
+     * BEAM SEARCH HMM IMPLEMENTATION
+     * Takes a list of probability maps (one map per joystick inflection).
+     * Explores the Trie, dropping highly improbable paths.
+     */
+    fun getProbabilisticPredictions(inputProbabilities: List<Map<Char, Float>>, beamWidth: Int = 15): List<String> {
+        if (inputProbabilities.isEmpty()) return emptyList()
+
+        // State: (CurrentNode, WordSoFar, CumulativeLogProbability)
+        var beam = listOf(Triple(root, "", 0.0f))
+
+        for (probabilityMap in inputProbabilities) {
+            val nextBeam = mutableListOf<Triple<TrieNode, String, Float>>()
+
+            for ((node, wordSoFar, logProb) in beam) {
+                // For every possible digit the user might have meant
+                for ((digit, prob) in probabilityMap) {
+                    if (prob < 0.02f) continue // Prune absolute noise
+
+                    val chars = digitToChars[digit] ?: continue
+                    val transitionLogProb = log(prob.toDouble(), 10.0).toFloat()
+
+                    // Try every character assigned to that digit
+                    for (char in chars) {
+                        if (node.children.containsKey(char)) {
+                            val childNode = node.children[char]!!
+                            nextBeam.add(Triple(childNode, wordSoFar + char, logProb + transitionLogProb))
+                        }
+                    }
+                }
+            }
+
+            // Sort by probability and keep only the top paths (The Beam)
+            beam = nextBeam.sortedByDescending { it.third }.take(beamWidth)
+            if (beam.isEmpty()) break
+        }
+
+        // Return the words from valid terminal nodes, sorted by their frequency and probability
+        return beam.filter { it.first.isWord }
+            .sortedByDescending { it.third + log(it.first.frequency.toDouble() + 1, 10.0).toFloat() }
+            .map { it.second }
+    }
+
+    // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)
+    fun getPredictions(sequence: String): List<String> {
+        val deterministicProbs = sequence.map { digit -> mapOf(digit to 1.0f) }
+        return getProbabilisticPredictions(deterministicProbs)
+    }
+
+    fun getCharsForDigit(digit: Char): List<Char> = digitToChars[digit] ?: emptyList()
+    fun getAllWords(): List<String> = allWordsList
+
+    private fun getCustomDictFile(): File {
+        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val t9Dir = File(downloadsDir, "T9Controller")
+        if (!t9Dir.exists()) t9Dir.mkdirs()
+        return File(t9Dir, "customdictionary.csv")
+    }
+
+    fun addCustomWord(word: String) {
+        insertWord(word.lowercase(), 999999)
+        try { getCustomDictFile().appendText("${word.lowercase()},999999\n") } catch (e: Exception) {}
+    }
+
+    // Change this from private to public in T9Engine.kt
+    fun wordToSequence(word: String): String {
         return word.map { charToDigit[it] ?: '0' }.joinToString("")
     }
-
-    fun getPredictions(sequence: String): List<String> {
-        if (sequence.isEmpty()) return emptyList()
-        val custom = customDictionary[sequence]?.map { it.first } ?: emptyList()
-        val default = dictionary[sequence]?.map { it.first } ?: emptyList()
-        return (custom + default).distinct()
-    }
-
-    fun getCharsForDigit(digit: Char): List<Char> {
-        return digitToChars[digit] ?: emptyList()
-    }
-
-    // Stores the word in RAM for immediate use
-    private fun addCustomWordToMemory(word: String) {
-        val sequence = wordToSequence(word)
-        if (!customDictionary.containsKey(sequence)) {
-            customDictionary[sequence] = mutableListOf()
-        }
-        // Check if it already exists to avoid duplicates
-        if (customDictionary[sequence]?.none { it.first == word } == true) {
-            customDictionary[sequence]?.add(0, word to 999999)
-        }
-    }
-
-    // Saves the word to RAM and appends it to the external CSV file
-    fun addCustomWord(word: String) {
-        val cleanWord = word.lowercase()
-        addCustomWordToMemory(cleanWord)
-
-        try {
-            val customFile = getCustomDictFile()
-            // Append word with a high fake frequency so you can edit the CSV easily later
-            customFile.appendText("$cleanWord,999999\n")
-        } catch (e: Exception) {
-            e.printStackTrace() // If permission isn't granted, it will fail silently here
-        }
-    }
-
-    fun getAllWords(): List<String> = allWordsList
 }

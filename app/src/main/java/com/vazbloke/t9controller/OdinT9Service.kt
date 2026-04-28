@@ -220,7 +220,7 @@ class OdinT9Service : InputMethodService() {
     }
 
     private fun handleJoystickDirection(x: Float, y: Float, isLeft: Boolean): Boolean {
-        val mag = sqrt((x * x + y * y).toDouble())
+        val mag = Math.sqrt((x * x + y * y).toDouble())
         if (mag < 0.25f) {
             if (isLeft) lastLJoyDirection = -1 else lastRJoyDirection = -1
             return false
@@ -228,9 +228,23 @@ class OdinT9Service : InputMethodService() {
 
         if (mag < 0.5f) return true
 
-        val angle = Math.toDegrees(atan2((-y).toDouble(), x.toDouble()))
+        val angle = Math.toDegrees(kotlin.math.atan2((-y).toDouble(), x.toDouble()))
         val normAngle = (angle + 360) % 360
-        val direction = (((normAngle + 22.5) % 360) / 45).toInt()
+
+        // Map angles to unequal direction spaces:
+        // Cardinals (39° space: ±19.5° from 0°, 90°, 180°, 270°)
+        // Diagonals (51° space: ±25.5° from 45°, 135°, 225°, 315°)
+        val direction = when {
+            normAngle < 19.5 -> 0    // Right (6)       - bounds: 340.5° to 19.5°
+            normAngle < 70.5 -> 1    // Down-Right (3)  - bounds: 19.5° to 70.5°
+            normAngle < 109.5 -> 2   // Down (2)        - bounds: 70.5° to 109.5°
+            normAngle < 160.5 -> 3   // Down-Left (1)   - bounds: 109.5° to 160.5°
+            normAngle < 199.5 -> 4   // Left (4)        - bounds: 160.5° to 199.5°
+            normAngle < 250.5 -> 5   // Up-Left (7)     - bounds: 199.5° to 250.5°
+            normAngle < 289.5 -> 6   // Up (8)          - bounds: 250.5° to 289.5°
+            normAngle < 340.5 -> 7   // Up-Right (9)    - bounds: 289.5° to 340.5°
+            else -> 0                // Right (6)       - bounds: 340.5° to 360.0°
+        }
 
         val lastDir = if (isLeft) lastLJoyDirection else lastRJoyDirection
         if (lastDir == -1) {

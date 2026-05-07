@@ -85,7 +85,7 @@ class T9Engine {
         if (!allWordsList.contains("i")) allWordsList.add("i")
         if (!allWordsList.contains("a")) allWordsList.add("a")
     }
-    
+
     private fun insertWord(word: String, frequency: Int) {
         var current = root
         for (char in word) {
@@ -131,10 +131,25 @@ class T9Engine {
                     val transitionLogProb = kotlin.math.log(prob.toDouble(), 10.0).toFloat()
 
                     // Try every character assigned to that digit
+                    // Try every character assigned to that digit
                     for (char in chars) {
+                        // 1. STANDARD PATH: The node has the character directly
                         if (node.children.containsKey(char)) {
                             val childNode = node.children[char]!!
                             nextBeam.add(Triple(childNode, wordSoFar + char, logProb + transitionLogProb))
+                        }
+
+                        // 2. AUTO-APOSTROPHE PATH:
+                        // If the node has an apostrophe, peek inside it to see if our target character is there!
+                        if (node.children.containsKey('\'')) {
+                            val apoNode = node.children['\'']!!
+                            if (apoNode.children.containsKey(char)) {
+                                val childNode = apoNode.children[char]!!
+                                // Append BOTH the hidden apostrophe and the user's character.
+                                // We subtract a tiny 0.1f penalty just so the engine slightly prefers
+                                // literal matches (like "cant" vs "can't" if both exist), but frequency usually wins.
+                                nextBeam.add(Triple(childNode, wordSoFar + "'" + char, logProb + transitionLogProb - 0.1f))
+                            }
                         }
                     }
                 }

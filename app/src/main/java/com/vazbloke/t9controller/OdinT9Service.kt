@@ -31,9 +31,6 @@ class OdinT9Service : InputMethodService() {
     private var isTriggerHeld = false
     private val currentStrokePath = mutableListOf<PointF>()
     private val wordProbabilities = mutableListOf<Map<Char, Float>>()
-    // --- New Features State ---
-    private var doubleAcceptPeriod = true
-    private var lastAcceptTime = 0L
     
     // --- Radial UI State ---
     private var isRadialMenuOpen = false
@@ -56,14 +53,21 @@ class OdinT9Service : InputMethodService() {
     private var currentPredictions = listOf<String>()
     private var predictionIndex = 0
 
-    private var autoSpace = true
     private var triggerKey = KeyEvent.KEYCODE_BUTTON_L1
     private val keyBindings = mutableMapOf<Int, Action>()
     private val undoStack = java.util.Stack<CharSequence>()
 
+    // --- New Features State ---
+    private var autoSpace = true
+    private var doubleAcceptPeriod = true
+    private var autoCap = true         // NEW
+    private var visualDebug = true     // NEW
+    private var lastAcceptTime = 0L
+
 
     enum class Action {
-        CYCLE_FWD, CYCLE_BACK, ACCEPT, CYCLE_PREV,
+        // CYCLE_FWD, CYCLE_BACK, 
+        ACCEPT, CYCLE_PREV,
         BACKSPACE_WORD, BACKSPACE_CHAR, ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, 
         ENTER // NEW
     }
@@ -90,6 +94,13 @@ class OdinT9Service : InputMethodService() {
     private fun loadSettings() {
         autoSpace = prefs.getBoolean("autospace_after_accept", true)
         doubleAcceptPeriod = prefs.getBoolean("double_accept_period", true)
+        autoCap = prefs.getBoolean("auto_capitalization", true) // NEW
+        visualDebug = prefs.getBoolean("visual_debug_mode", true) // NEW
+
+        // NEW: Hide the debug grid dynamically
+        if (::swipeDebugView.isInitialized) {
+            swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
+        }
 
         keyBindings.clear()
         // keyBindings[prefs.getInt("key_cycle_fwd", KeyEvent.KEYCODE_BUTTON_R1)] = Action.CYCLE_FWD
@@ -109,7 +120,9 @@ class OdinT9Service : InputMethodService() {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)
         swipeDebugView = view.findViewById(R.id.swipe_debug_view)
-        swipeDebugView.visibility = View.VISIBLE
+        
+        // NEW: Respect the visual debug setting on boot
+        swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         tvPredictions.text = "JoyJoy Ready"
         return view
     }
@@ -249,16 +262,18 @@ class OdinT9Service : InputMethodService() {
                 if (isPunctuationMode) {
                     val items = if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
                     saveUndoSnapshot()
-                    ic?.commitText(items[radialSelectedIndex], 1)
+                    currentInputConnection?.commitText(items[radialSelectedIndex], 1)
                 } else if (currentPredictions.isNotEmpty() && radialSelectedIndex < currentPredictions.size) {
                     saveUndoSnapshot()
-
-                    // THE FIX: Split commit for the Radial menu!
-                    ic?.commitText(currentPredictions[radialSelectedIndex], 1)
+                    val ic = currentInputConnection
+                    
+                    // THE FIX: Check capitalization for Radial Menu words!
+                    val wordToCommit = getCapitalizedWord(currentPredictions[radialSelectedIndex])
+                    ic?.commitText(wordToCommit, 1)
+                    
                     if (autoSpace) ic?.commitText(" ", 1)
-
                     lastAcceptTime = System.currentTimeMillis()
-                    resetState()
+                    resetState() 
                 }
                 updateUI()
             }
@@ -288,28 +303,29 @@ class OdinT9Service : InputMethodService() {
         val ic = currentInputConnection ?: return
 
         when (action) {
-            Action.CYCLE_FWD -> {
-                if (currentPredictions.isNotEmpty()) {
-                    predictionIndex = (predictionIndex + 1) % currentPredictions.size
-                    updateUI()
-                }
-            }
-            Action.CYCLE_BACK -> {
-                if (currentPredictions.isNotEmpty()) {
-                    predictionIndex = (predictionIndex - 1 + currentPredictions.size) % currentPredictions.size
-                    updateUI()
-                }
-            }
+            // Action.CYCLE_FWD -> {
+            //     if (currentPredictions.isNotEmpty()) {
+            //         predictionIndex = (predictionIndex + 1) % currentPredictions.size
+            //         updateUI()
+            //     }
+            // }
+            // Action.CYCLE_BACK -> {
+            //     if (currentPredictions.isNotEmpty()) {
+            //         predictionIndex = (predictionIndex - 1 + currentPredictions.size) % currentPredictions.size
+            //         updateUI()
+            //     }
+            // }
             Action.ACCEPT -> {
                 saveUndoSnapshot()
                 val now = System.currentTimeMillis()
-                val ic = currentInputConnection ?: return // Safety check
+                val ic = currentInputConnection ?: return
 
                 if (currentPredictions.isNotEmpty()) {
-                    // THE FIX: Split the commit to bypass Android auto-cap eating spaces
-                    ic.commitText(currentPredictions[predictionIndex], 1)
-                    if (autoSpace) ic.commitText(" ", 1)
+                    // THE FIX: Check capitalization before committing!
+                    val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+                    ic.commitText(wordToCommit, 1)
                     
+                    if (autoSpace) ic.commitText(" ", 1)
                     lastAcceptTime = now
                 } else {
                     // Empty Accept - Check for Double Tap!
@@ -501,5 +517,20 @@ class OdinT9Service : InputMethodService() {
 
     private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
         return sqrt(Math.pow((x2 - p1.x).toDouble(), 2.0) + Math.pow((y2 - p1.y).toDouble(), 2.0)).toFloat()
+    }
+
+    private fun getCapitalizedWord(word: String): String {
+        if (!autoCap) return word
+        
+        val ic = currentInputConnection ?: return word
+        val editorInfo = currentInputEditorInfo ?: return word
+
+        // Ask the Android OS if the cursor is in a position that demands capitalization
+        val capsMode = ic.getCursorCapsMode(editorInfo.inputType)
+        return if (capsMode > 0) {
+            word.replaceFirstChar { it.uppercase() }
+        } else {
+            word
+        }
     }
 }

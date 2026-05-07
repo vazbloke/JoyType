@@ -69,6 +69,11 @@ class OdinT9Service : InputMethodService() {
     private var vibrateDuration = 15L
     private lateinit var vibrator: Vibrator
 
+    // --- Cursor UI State ---
+    private var isCursorModifierHeld = false
+    private val cursorKey = KeyEvent.KEYCODE_BUTTON_Z // Your M2 Button
+    private var lastCursorMoveTime = 0L
+
 
     enum class Action {
         // CYCLE_FWD, CYCLE_BACK, 
@@ -171,9 +176,11 @@ class OdinT9Service : InputMethodService() {
                     // 2. Pagination Logic (iPod click-wheel style)
                     if (radialLastOctant != -1) {
                         if (radialLastOctant == 7 && octant == 0) {
-                            radialPage = (radialPage + 1) % maxPages // Roll forward
+                            // Roll forward, cap at the last page
+                            radialPage = kotlin.math.min(radialPage + 1, maxPages - 1)
                         } else if (radialLastOctant == 0 && octant == 7) {
-                            radialPage = (radialPage - 1 + maxPages) % maxPages // Roll backward
+                            // Roll backward, cap at the first page
+                            radialPage = kotlin.math.max(radialPage - 1, 0)
                         }
                     }
                     radialLastOctant = octant
@@ -199,6 +206,38 @@ class OdinT9Service : InputMethodService() {
                     }
                 }
                 return true
+            }
+
+            // --- CURSOR MODIFIER INTERCEPT ---
+            if (isCursorModifierHeld) {
+                if (mag > 0.2f) { // Slight deadzone
+                    val now = System.currentTimeMillis()
+                    
+                    // Analog Speed: Hard push = 50ms delay, Soft push = 150ms delay
+                    val delay = 150L - (mag * 100L).toLong() 
+                    
+                    if (now - lastCursorMoveTime > delay) {
+                        val ic = currentInputConnection
+                        if (ic != null) {
+                            // Determine if the user is pushing mostly horizontal or vertical
+                            if (kotlin.math.abs(x) > kotlin.math.abs(y)) {
+                                if (x > 0) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT))
+                                else ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
+                            } else {
+                                if (y > 0) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN))
+                                else ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP))
+                            }
+                            
+                            // A tiny micro-vibration so you can "feel" the cursor jumping lines
+                            if (vibrateOnType && vibrator.hasVibrator()) {
+                                @Suppress("DEPRECATION")
+                                vibrator.vibrate(5L) 
+                            }
+                            lastCursorMoveTime = now
+                        }
+                    }
+                }
+                return true // Stop standard typing math!
             }
 
             // --- NORMAL T9 TYPING ---
@@ -292,6 +331,18 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             return true
         }
 
+        if (keyCode == cursorKey) {
+            isCursorModifierHeld = true
+            return true
+        }
+
+        // D-PAD TEXT CURSOR PASSTHROUGH
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+            keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            return true
+        }
+
         return super.onKeyDown(keyCode, event)
     }
 
@@ -343,6 +394,18 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             }
             return true
         }
+
+        if (keyCode == cursorKey) {
+            isCursorModifierHeld = false
+            return true
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+            keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            return true
+        }
+
         return super.onKeyUp(keyCode, event)
     }
 
@@ -411,16 +474,23 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                 }
             }
             Action.BACKSPACE_WORD -> {
-                saveUndoSnapshot()
-
                 triggerHapticClick()
 
-                val textBefore = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
-                val spacesMatch = Regex("\\s+$").find(textBefore)
-                val spacesLen = spacesMatch?.value?.length ?: 0
-                val wordMatch = Regex("\\S+\\s*$").find(textBefore)
-                val deleteLen = wordMatch?.value?.length ?: spacesLen
-                if (deleteLen > 0) ic.deleteSurroundingText(deleteLen, 0)
+                if (wordProbabilities.isNotEmpty()) {
+                    // COMPOSING MODE: Nuke the entire active input thread
+                    wordProbabilities.clear()
+                    currentStrokePath.clear()
+                    updateLivePredictions()
+                } else {
+                    // NORMAL MODE: Delete the whole word in the text box
+                    saveUndoSnapshot()
+                    val textBefore = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
+                    val spacesMatch = Regex("\\s+$").find(textBefore)
+                    val spacesLen = spacesMatch?.value?.length ?: 0
+                    val wordMatch = Regex("\\S+\\s*$").find(textBefore)
+                    val deleteLen = wordMatch?.value?.length ?: spacesLen
+                    if (deleteLen > 0) ic.deleteSurroundingText(deleteLen, 0)
+                }
             }
             Action.BACKSPACE_CHAR -> ic.deleteSurroundingText(1, 0)
             Action.ADD_SPACE -> {
@@ -519,6 +589,7 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         radialPage = 0
         radialLastOctant = -1
         vibratedThisStroke = false
+        isCursorModifierHeld = false
     }
 
     private fun updateUI() {

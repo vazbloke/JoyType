@@ -47,22 +47,26 @@ class SettingsActivity : AppCompatActivity() {
             prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
 
             val bindableKeys = listOf(
+                // "key_cycle_fwd", "key_cycle_back", 
+                "key_accept",
                 "key_cycle_prev", "key_backspace_word", "key_backspace_char",
-                "key_add_space", "key_clear_text", "key_undo", "key_open_settings"
+                "key_add_space", "key_clear_text", "key_undo", "key_open_settings",
+                "key_enter" // NEW
             )
 
             // Default fallback mappings if never set
             val defaultMappings = mapOf(
-                "key_cycle_fwd" to KeyEvent.KEYCODE_BUTTON_R1,
-                "key_cycle_back" to KeyEvent.KEYCODE_BUTTON_L2,
-                "key_accept" to KeyEvent.KEYCODE_BUTTON_R2,
+                // "key_cycle_fwd" to KeyEvent.KEYCODE_BUTTON_R1,
+                // "key_cycle_back" to KeyEvent.KEYCODE_BUTTON_L2,
+                "key_accept" to KeyEvent.KEYCODE_BUTTON_R1,
                 "key_cycle_prev" to KeyEvent.KEYCODE_BUTTON_X,
                 "key_backspace_word" to KeyEvent.KEYCODE_BUTTON_Y,
                 "key_backspace_char" to KeyEvent.KEYCODE_BUTTON_B,
                 "key_add_space" to KeyEvent.KEYCODE_BUTTON_A,
                 "key_clear_text" to KeyEvent.KEYCODE_BUTTON_SELECT,
                 "key_undo" to KeyEvent.KEYCODE_BUTTON_THUMBL,
-                "key_open_settings" to KeyEvent.KEYCODE_BUTTON_START
+                "key_open_settings" to KeyEvent.KEYCODE_BUTTON_START, // Moved to Select
+                "key_enter" to KeyEvent.KEYCODE_BUTTON_R2 // NEW
             )
 
             for (key in bindableKeys) {

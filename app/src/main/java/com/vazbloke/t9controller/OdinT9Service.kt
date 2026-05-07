@@ -64,7 +64,8 @@ class OdinT9Service : InputMethodService() {
 
     enum class Action {
         CYCLE_FWD, CYCLE_BACK, ACCEPT, CYCLE_PREV,
-        BACKSPACE_WORD, BACKSPACE_CHAR, ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE
+        BACKSPACE_WORD, BACKSPACE_CHAR, ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, 
+        ENTER // NEW
     }
 
     private val t9Centers = mapOf(
@@ -91,9 +92,9 @@ class OdinT9Service : InputMethodService() {
         doubleAcceptPeriod = prefs.getBoolean("double_accept_period", true)
 
         keyBindings.clear()
-        keyBindings[prefs.getInt("key_cycle_fwd", KeyEvent.KEYCODE_BUTTON_R1)] = Action.CYCLE_FWD
-        keyBindings[prefs.getInt("key_cycle_back", KeyEvent.KEYCODE_BUTTON_L2)] = Action.CYCLE_BACK
-        keyBindings[prefs.getInt("key_accept", KeyEvent.KEYCODE_BUTTON_R2)] = Action.ACCEPT
+        // keyBindings[prefs.getInt("key_cycle_fwd", KeyEvent.KEYCODE_BUTTON_R1)] = Action.CYCLE_FWD
+        // keyBindings[prefs.getInt("key_cycle_back", KeyEvent.KEYCODE_BUTTON_L2)] = Action.CYCLE_BACK
+        keyBindings[prefs.getInt("key_accept", KeyEvent.KEYCODE_BUTTON_R1)] = Action.ACCEPT
         keyBindings[prefs.getInt("key_cycle_prev", KeyEvent.KEYCODE_BUTTON_X)] = Action.CYCLE_PREV
         keyBindings[prefs.getInt("key_backspace_word", KeyEvent.KEYCODE_BUTTON_Y)] = Action.BACKSPACE_WORD
         keyBindings[prefs.getInt("key_backspace_char", KeyEvent.KEYCODE_BUTTON_B)] = Action.BACKSPACE_CHAR
@@ -101,6 +102,7 @@ class OdinT9Service : InputMethodService() {
         keyBindings[prefs.getInt("key_clear_text", KeyEvent.KEYCODE_BUTTON_SELECT)] = Action.CLEAR_TEXT
         keyBindings[prefs.getInt("key_undo", KeyEvent.KEYCODE_BUTTON_THUMBL)] = Action.UNDO
         keyBindings[prefs.getInt("key_open_settings", KeyEvent.KEYCODE_BUTTON_START)] = Action.OPEN_SETTINGS
+        keyBindings[prefs.getInt("key_enter", KeyEvent.KEYCODE_BUTTON_R2)] = Action.ENTER
     }
 
     override fun onCreateInputView(): View {
@@ -367,6 +369,28 @@ class OdinT9Service : InputMethodService() {
                 intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(intent)
             }
+            Action.ENTER -> {
+                saveUndoSnapshot()
+                val ic = currentInputConnection ?: return
+                val editorInfo = currentInputEditorInfo
+                
+                if (editorInfo != null) {
+                    val actionId = editorInfo.imeOptions and android.view.inputmethod.EditorInfo.IME_MASK_ACTION
+                    
+                    // If the text box has a specific action (Search, Send, Done, Go)
+                    if (actionId != android.view.inputmethod.EditorInfo.IME_ACTION_NONE && 
+                        actionId != android.view.inputmethod.EditorInfo.IME_ACTION_UNSPECIFIED) {
+                        ic.performEditorAction(actionId)
+                    } else {
+                        // Otherwise, just inject a standard physical Enter/Return key press
+                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+                    }
+                }
+                
+                // Optional: If you want the keyboard to forcefully hide itself after pressing Enter
+                // requestHideSelf(0) 
+            }
             Action.NONE -> {}
         }
     }
@@ -402,10 +426,8 @@ class OdinT9Service : InputMethodService() {
             return
         }
         
-        val display = if (isRadialMenuOpen) {
+        var display = if (isRadialMenuOpen) {
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
-            
-            // NEW: Fetch the correct list for drawing
             val items = if (isPunctuationMode) {
                 if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
             } else currentPredictions
@@ -419,6 +441,11 @@ class OdinT9Service : InputMethodService() {
             currentPredictions.mapIndexed { index, word ->
                 if (index == predictionIndex) "<b><font color='#A3FF00'>[$word]</font></b>" else word
             }.joinToString("   ")
+        }
+        
+        // NEW: Add the Page Indicator if we are in the Punctuation Menu
+        if (isRadialMenuOpen && isPunctuationMode) {
+            display += "   <font color='#888888'><i>[Pg ${radialPage + 1}/2]</i></font>"
         }
         
         tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)

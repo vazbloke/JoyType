@@ -21,22 +21,27 @@ class OdinT9Service : InputMethodService() {
     private lateinit var tvPredictions: TextView
     private lateinit var swipeDebugView: SwipeDebugView
     private val t9Engine = T9Engine()
-    private val swipeEngine = SwipeEngine()
     private lateinit var prefs: SharedPreferences
 
     // Most controllers map the extra C/Z buttons to these:
     private val MODIFIER_KEY_1 = KeyEvent.KEYCODE_BUTTON_C
     private val MODIFIER_KEY_2 = KeyEvent.KEYCODE_BUTTON_Z
 
-    // --- Hybrid State ---
+    // --- Core State ---
     private var isTriggerHeld = false
     private val currentStrokePath = mutableListOf<PointF>()
     private val wordProbabilities = mutableListOf<Map<Char, Float>>()
-
-    // --- RADIAL UI STATE ---
+    // --- New Features State ---
+    private var doubleAcceptPeriod = true
+    private var lastAcceptTime = 0L
+    
+    // --- Radial UI State ---
     private var isRadialMenuOpen = false
+    private var isPunctuationMode = false
     private var radialSelectedIndex = 0
-    private val RADIAL_KEY = KeyEvent.KEYCODE_BUTTON_C // Change this to your M1 keycode
+    private val PUNCTUATIONS = listOf(".", ",", "?", "!", "-", "'", "@", ":")
+    private val RADIAL_KEY = KeyEvent.KEYCODE_BUTTON_C // Your M1 Button
+
 
     private var joyAngleSum = 0f
     private var joyLastAngle = -999f
@@ -66,7 +71,7 @@ class OdinT9Service : InputMethodService() {
         super.onCreate()
         prefs = PreferenceManager.getDefaultSharedPreferences(this)
         t9Engine.loadDictionary(this)
-        swipeEngine.dictionary = t9Engine.getAllWords()
+//        swipeEngine.dictionary = t9Engine.getAllWords()
         loadSettings()
     }
 
@@ -77,7 +82,7 @@ class OdinT9Service : InputMethodService() {
 
     private fun loadSettings() {
         autoSpace = prefs.getBoolean("autospace_after_accept", true)
-        triggerKey = prefs.getInt("key_trigger", KeyEvent.KEYCODE_BUTTON_L1)
+        doubleAcceptPeriod = prefs.getBoolean("double_accept_period", true)
 
         keyBindings.clear()
         keyBindings[prefs.getInt("key_cycle_fwd", KeyEvent.KEYCODE_BUTTON_R1)] = Action.CYCLE_FWD
@@ -122,22 +127,22 @@ class OdinT9Service : InputMethodService() {
 
             // --- RADIAL UI JOYSTICK INTERCEPT ---
             if (isRadialMenuOpen) {
-                if (mag > 0.3f) { // Deadzone so a resting thumb doesn't jump the selection
-                    // 1. Calculate angle, shift Top to 0, range [0, 2PI)
-                    var angle = kotlin.math.atan2(y.toDouble(), x.toDouble())
-                    angle += Math.PI / 2.0
+                if (mag > 0.3f) { 
+                    var angle = kotlin.math.atan2(y.toDouble(), x.toDouble()) 
+                    angle += Math.PI / 2.0 
                     if (angle < 0) angle += 2 * Math.PI
 
-                    // 2. Divide into 8 octants (0 = Top, 1 = TopRight, 2 = Right...)
                     val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
-
-                    // 3. Prevent crashing if there are less than 8 words available
-                    if (currentPredictions.isNotEmpty()) {
-                        radialSelectedIndex = octant.coerceAtMost(currentPredictions.size - 1)
+                    
+                    // NEW: Use Punctuation mode or Word mode
+                    val maxIndex = if (isPunctuationMode) PUNCTUATIONS.size - 1 else currentPredictions.size - 1
+                    
+                    if (maxIndex >= 0) {
+                        radialSelectedIndex = octant.coerceAtMost(maxIndex)
                         updateUI()
                     }
                 }
-                return true // Stop standard T9 math from running!
+                return true
             }
 
             // --- NORMAL T9 TYPING ---
@@ -150,80 +155,31 @@ class OdinT9Service : InputMethodService() {
     private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         val mapped = mapCircleToSquare(rawX, rawY)
 
-        // 1. HARDWARE SNAPBACK TO CENTER (MAGNITUDE 0.0)
         if (mag == 0.0f) {
+            // SNAPBACK: Find the sharpest point of the flick and save the letter
             if (currentStrokePath.isNotEmpty()) {
-                if (isTriggerHeld) {
-                    // Continuous Swipe: Trace the center crossing visually
-                    currentStrokePath.add(PointF(0f, 0f))
-                } else {
-                    // Discrete Mode: Finalize the single character flick
-                    if (!circleDetectedThisStroke) {
-                        val maxPt = currentStrokePath.maxByOrNull { sqrt(it.x * it.x + it.y * it.y) }
-                        if (maxPt != null && sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
-                            wordProbabilities.add(generateProbabilityMap(maxPt)) // Reverted to Digits
-                        }
-                    }
-                    currentStrokePath.clear()
-                    circleDetectedThisStroke = false
-                    updateLivePredictions()
+                val maxPt = currentStrokePath.maxByOrNull { kotlin.math.sqrt(it.x * it.x + it.y * it.y) }
+                if (maxPt != null && kotlin.math.sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
+                    wordProbabilities.add(generateProbabilityMap(maxPt))
                 }
+                currentStrokePath.clear()
+                updateLivePredictions()
             }
-            joyAngleSum = 0f
-            joyLastAngle = -999f
             return
         }
 
-        // 2. ACTIVE MOVEMENT
+        // ACTIVE MOVEMENT: Just record the path to find the max point later
         currentStrokePath.add(PointF(mapped.x, mapped.y))
-
-        // 3. '5' CIRCLE DETECTION
-        val currentAngle = atan2(rawY.toDouble(), rawX.toDouble()).toFloat()
-        if (joyLastAngle == -999f) joyLastAngle = currentAngle
-
-        var delta = currentAngle - joyLastAngle
-        while (delta > Math.PI) delta -= (2 * Math.PI).toFloat()
-        while (delta < -Math.PI) delta += (2 * Math.PI).toFloat()
-
-        // Accumulate smooth rotation. A straight line cross resets it.
-        if (abs(delta) < (Math.PI / 2)) joyAngleSum += delta else joyAngleSum = 0f
-        joyLastAngle = currentAngle
-
-        if (abs(joyAngleSum) > Math.PI && !circleDetectedThisStroke) {
-            circleDetectedThisStroke = true
-            val fiveMap = t9Centers.keys.associateWith { if (it == '5') 0.95f else 0.005f }
-            wordProbabilities.add(fiveMap)
-            joyAngleSum = 0f
-            updateLivePredictions()
-        }
-
-        // Only live-update while swiping to show the inflections, discrete updates on snapback
-        if (isTriggerHeld) {
-            updateLivePredictions()
-        } else {
-            // But still draw the raw line for discrete mode
-            swipeDebugView.updateJoyT9Debug(currentStrokePath, emptyList(), wordProbabilities)
-        }
+        swipeDebugView.updateJoyT9Debug(currentStrokePath, emptyList(), wordProbabilities)
     }
 
     private fun updateLivePredictions() {
-        val tempProbabilities = wordProbabilities.toMutableList()
-
-        var activeInflections = listOf<PointF>()
-        // If swiping, dynamically extract and preview the corners being built
-        if (isTriggerHeld && currentStrokePath.isNotEmpty()) {
-            activeInflections = swipeEngine.extractInflectionPoints(currentStrokePath)
-            for (point in activeInflections) {
-                if (kotlin.math.abs(point.x) < 0.1f && kotlin.math.abs(point.y) < 0.1f) continue
-                tempProbabilities.add(generateProbabilityMap(point))
-            }
-        }
-
-        swipeDebugView.updateJoyT9Debug(currentStrokePath, activeInflections, tempProbabilities)
-
-        if (tempProbabilities.isNotEmpty()) {
-            currentPredictions = t9Engine.getProbabilisticPredictions(tempProbabilities)
+        if (wordProbabilities.isNotEmpty()) {
+            currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
             predictionIndex = 0
+            updateUI()
+        } else {
+            currentPredictions = emptyList()
             updateUI()
         }
     }
@@ -232,13 +188,12 @@ class OdinT9Service : InputMethodService() {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
         if (event.repeatCount > 0) return true
 
-        // RADIAL UI: OPEN
+        // RADIAL UI: OPEN (Words OR Punctuation)
         if (keyCode == RADIAL_KEY) {
-            if (currentPredictions.isNotEmpty()) {
-                isRadialMenuOpen = true
-                radialSelectedIndex = 0 // Default to the first word
-                updateUI()
-            }
+            isRadialMenuOpen = true
+            isPunctuationMode = currentPredictions.isEmpty() // Empty = Punctuation Mode!
+            radialSelectedIndex = 0 
+            updateUI()
             return true
         }
 
@@ -259,20 +214,24 @@ class OdinT9Service : InputMethodService() {
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
 
-        // RADIAL UI: COMMIT WORD AND CLOSE
+        // RADIAL UI: COMMIT
         if (keyCode == RADIAL_KEY) {
             if (isRadialMenuOpen) {
                 isRadialMenuOpen = false
-
-                // User let go of M1, commit the highlighted word!
-                if (currentPredictions.isNotEmpty() && radialSelectedIndex < currentPredictions.size) {
+                
+                if (isPunctuationMode) {
+                    // Commit Punctuation
+                    saveUndoSnapshot()
+                    currentInputConnection?.commitText(PUNCTUATIONS[radialSelectedIndex], 1)
+                } else if (currentPredictions.isNotEmpty() && radialSelectedIndex < currentPredictions.size) {
+                    // Commit Word
                     saveUndoSnapshot()
                     val space = if (autoSpace) " " else ""
                     currentInputConnection?.commitText("${currentPredictions[radialSelectedIndex]}$space", 1)
-                    resetState()
-                } else {
-                    updateUI()
+                    lastAcceptTime = System.currentTimeMillis() // Track for double-accept!
+                    resetState() 
                 }
+                updateUI()
             }
             return true
         }
@@ -283,11 +242,11 @@ class OdinT9Service : InputMethodService() {
 
             // Finalize the active swipe stroke upon releasing the trigger
             if (currentStrokePath.isNotEmpty()) {
-                val inflections = swipeEngine.extractInflectionPoints(currentStrokePath)
-                for (point in inflections) {
-                    if (abs(point.x) < 0.1f && abs(point.y) < 0.1f) continue
-                    wordProbabilities.add(generateProbabilityMap(point)) // Reverted to Digits
-                }
+//                val inflections = swipeEngine.extractInflectionPoints(currentStrokePath)
+//                for (point in inflections) {
+//                    if (abs(point.x) < 0.1f && abs(point.y) < 0.1f) continue
+//                    wordProbabilities.add(generateProbabilityMap(point)) // Reverted to Digits
+//                }
                 currentStrokePath.clear()
                 updateLivePredictions()
             }
@@ -314,9 +273,27 @@ class OdinT9Service : InputMethodService() {
             }
             Action.ACCEPT -> {
                 saveUndoSnapshot()
+                val now = System.currentTimeMillis()
+                
                 if (currentPredictions.isNotEmpty()) {
+                    // Normal Word Accept
                     val space = if (autoSpace) " " else ""
                     ic.commitText("${currentPredictions[predictionIndex]}$space", 1)
+                    lastAcceptTime = now
+                } else {
+                    // Empty Accept - Check for Double Tap!
+                    if (doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
+                        val textBefore = ic.getTextBeforeCursor(2, 0)?.toString()
+                        if (textBefore?.endsWith(" ") == true) {
+                            ic.deleteSurroundingText(1, 0) // Delete the space
+                        }
+                        ic.commitText(". ", 1)
+                        lastAcceptTime = 0L // Reset
+                    } else {
+                        // Standard space addition
+                        ic.commitText(" ", 1)
+                        lastAcceptTime = now
+                    }
                 }
                 resetState()
             }
@@ -391,32 +368,31 @@ class OdinT9Service : InputMethodService() {
         swipeDebugView.clear()
         tvPredictions.text = "JoyJoy Ready"
         isRadialMenuOpen = false
+        isPunctuationMode = false
     }
 
     private fun updateUI() {
-        if (currentPredictions.isEmpty()) {
-            tvPredictions.text = "Tracking..."
+        if (currentPredictions.isEmpty() && !isRadialMenuOpen) {
+            tvPredictions.text = "JoyJoy Ready"
             return
         }
-
+        
         val display = if (isRadialMenuOpen) {
-            // RADIAL UI MODE: Add arrows and dim unselected words
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
-            currentPredictions.mapIndexed { index, word ->
+            val items = if (isPunctuationMode) PUNCTUATIONS else currentPredictions
+            
+            items.mapIndexed { index, word ->
                 val dir = if (index < arrows.size) arrows[index] else ""
-
-                if (index == radialSelectedIndex) "<b><font color='#FFA500'>[$dir $word]</font></b>"
+                if (index == radialSelectedIndex) "<b><font color='#FFA500'>[$dir $word]</font></b>" 
                 else "<font color='#555555'>$dir $word</font>"
             }.joinToString("   ")
-
         } else {
-            // STANDARD MODE
             currentPredictions.mapIndexed { index, word ->
                 if (index == predictionIndex) "<b><font color='#A3FF00'>[$word]</font></b>" else word
             }.joinToString("   ")
         }
-
-        tvPredictions.text = Html.fromHtml(display, Html.FROM_HTML_MODE_LEGACY)
+        
+        tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
     }
 
     private fun generateProbabilityMap(pt: PointF): Map<Char, Float> {

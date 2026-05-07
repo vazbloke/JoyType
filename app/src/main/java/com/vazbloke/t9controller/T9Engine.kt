@@ -167,7 +167,7 @@ class T9Engine {
             // ... inside getProbabilisticPredictions:
             // Make sure you update the end of the return statement from .take(6) to .take(8)
             .map { it.second }
-            .take(8) // We need 8 to fill the radial UI!
+            .take(24) // NEW: 3 pages of 8 words
     }
 
     // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)

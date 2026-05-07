@@ -3,16 +3,17 @@
 
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="Odin T9 Keyboard"
         android:theme="@style/Theme.AppCompat.Light">
+        <activity android:name=".MainActivity" />
 
         <service
             android:name=".OdinT9Service"
-            android:label="Odin T9 Keyboard"
             android:permission="android.permission.BIND_INPUT_METHOD"
             android:exported="true">
             <intent-filter>
@@ -22,5 +23,11 @@
                 android:name="android.view.im"
                 android:resource="@xml/method" />
         </service>
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:theme="@style/Theme.AppCompat.DayNight"
+            android:label="Odin T9 Settings" />
     </application>
 </manifest>

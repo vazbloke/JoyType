@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <androidx.preference.PreferenceCategory android:title="Typing Behavior">
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="autospace_after_accept"
+            android:title="Autospace after accepting"
+            android:summary="Automatically add a space when a prediction is accepted"
+            android:defaultValue="true" />
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="double_accept_period"
+            android:title="Double Accept for Period"
+            android:summary="Double tap the Accept key to insert a period and space"
+            android:defaultValue="true" />
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="auto_capitalization"
+            android:title="Auto-Capitalization"
+            android:summary="Automatically capitalize the first word of a sentence"
+            android:defaultValue="true" />
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="visual_debug_mode"
+            android:title="Visual Debug Mode"
+            android:summary="Show the 9-segment grid and joystick trace line"
+            android:defaultValue="true" />
+    </androidx.preference.PreferenceCategory>
+
+    <androidx.preference.PreferenceCategory android:title="Key Bindings">
+        <androidx.preference.Preference android:key="key_trigger" android:title="Word Boundary Trigger Key (Hold to Swipe)" />
+        <androidx.preference.Preference android:key="key_cycle_fwd" android:title="Cycle Prediction Forward" />
+        <androidx.preference.Preference android:key="key_cycle_back" android:title="Cycle Prediction Backward" />
+        <androidx.preference.Preference android:key="key_accept" android:title="Accept Prediction" />
+        <androidx.preference.Preference android:key="key_cycle_prev" android:title="Cycle Previously Accepted Word" />
+        <androidx.preference.Preference android:key="key_backspace_word" android:title="Backspace Entire Word" />
+        <androidx.preference.Preference android:key="key_backspace_char" android:title="Backspace Single Character (Legacy)" />
+        <androidx.preference.Preference android:key="key_backspace_stroke" android:title="Backspace Active Stroke / Character" />
+        <androidx.preference.Preference android:key="key_add_space" android:title="Add Space" />
+        <androidx.preference.Preference android:key="key_clear_text" android:title="Clear Entire Textbox" />
+        <androidx.preference.Preference android:key="key_enter" android:title="Enter / Send / Go" />
+        <androidx.preference.Preference android:key="key_undo" android:title="Undo Last Operation" />
+        <androidx.preference.Preference android:key="key_open_settings" android:title="Open Settings" />
+    </androidx.preference.PreferenceCategory>
+
+    <androidx.preference.PreferenceCategory android:title="Haptics &amp; Feedback">
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="vibrate_on_type"
+            android:title="Vibrate on Input"
+            android:summary="Provide haptic feedback on joystick flicks and button presses"
+            android:defaultValue="true" />
+
+        <SeekBarPreference
+            app:key="vibrate_duration"
+            app:title="Vibration Duration (ms)"
+            app:min="1"
+            android:max="100" 
+            app:defaultValue="25"
+            app:showSeekBarValue="true" />
+    </androidx.preference.PreferenceCategory>
+
+</androidx.preference.PreferenceScreen>

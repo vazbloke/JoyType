@@ -1,5 +1,6 @@
 package com.vazbloke.t9controller
 
+import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.PointF
 import android.inputmethodservice.InputMethodService
@@ -16,6 +17,11 @@ import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.sqrt
 
+import android.os.Vibrator
+import android.os.VibrationEffect
+import android.os.Build
+import android.view.animation.OvershootInterpolator // For the spring animation!
+
 class OdinT9Service : InputMethodService() {
 
     private lateinit var tvPredictions: TextView
@@ -23,31 +29,25 @@ class OdinT9Service : InputMethodService() {
     private val t9Engine = T9Engine()
     private lateinit var prefs: SharedPreferences
 
-    // Most controllers map the extra C/Z buttons to these:
-    private val MODIFIER_KEY_1 = KeyEvent.KEYCODE_BUTTON_C
-    private val MODIFIER_KEY_2 = KeyEvent.KEYCODE_BUTTON_Z
-
     // --- Core State ---
     private var isTriggerHeld = false
     private val currentStrokePath = mutableListOf<PointF>()
     private val wordProbabilities = mutableListOf<Map<Char, Float>>()
+    private var vibratedThisStroke = false // NEW: Tracks the flick attack!
     
     // --- Radial UI State ---
     private var isRadialMenuOpen = false
     private var isPunctuationMode = false
     private var radialSelectedIndex = 0
     // private val PUNCTUATIONS = listOf(".", ",", "?", "!", "-", "'", "@", ":")
-    private val RADIAL_KEY = KeyEvent.KEYCODE_BUTTON_C // Your M1 Button
+    private val radialKey = KeyEvent.KEYCODE_BUTTON_C // Your M1 Button
 
     // NEW: Pagination State
     private var radialPage = 0 
     private var radialLastOctant = -1
-    private val PUNCTUATIONS_P1 = listOf(".", ",", "?", "!", "-", "'", "@", ":")
-    private val PUNCTUATIONS_P2 = listOf("\"", "(", ")", "/", "\\", "_", ";", "&") // Add whatever you want here!
+    private val punctuationsP1 = listOf(".", ",", "?", "!", "-", "'", "@", ":")
+    private val punctuationsP2 = listOf("\"", "(", ")", "/", "\\", "_", ";", "&") // Add whatever you want here!
 
-
-    private var joyAngleSum = 0f
-    private var joyLastAngle = -999f
     private var circleDetectedThisStroke = false
 
     private var currentPredictions = listOf<String>()
@@ -63,6 +63,11 @@ class OdinT9Service : InputMethodService() {
     private var autoCap = true         // NEW
     private var visualDebug = true     // NEW
     private var lastAcceptTime = 0L
+
+    // Vibrate options
+    private var vibrateOnType = true
+    private var vibrateDuration = 15L
+    private lateinit var vibrator: Vibrator
 
 
     enum class Action {
@@ -80,6 +85,7 @@ class OdinT9Service : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
+        vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         prefs = PreferenceManager.getDefaultSharedPreferences(this)
         t9Engine.loadDictionary(this)
 //        swipeEngine.dictionary = t9Engine.getAllWords()
@@ -96,6 +102,9 @@ class OdinT9Service : InputMethodService() {
         doubleAcceptPeriod = prefs.getBoolean("double_accept_period", true)
         autoCap = prefs.getBoolean("auto_capitalization", true) // NEW
         visualDebug = prefs.getBoolean("visual_debug_mode", true) // NEW
+
+        vibrateOnType = prefs.getBoolean("vibrate_on_type", true)
+        vibrateDuration = prefs.getInt("vibrate_duration", 15).toLong()
 
         // NEW: Hide the debug grid dynamically
         if (::swipeDebugView.isInitialized) {
@@ -124,7 +133,7 @@ class OdinT9Service : InputMethodService() {
         
         // NEW: Respect the visual debug setting on boot
         swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
-        tvPredictions.text = "JoyJoy Ready"
+        tvPredictions.text = "..."
         return view
     }
 
@@ -136,11 +145,11 @@ class OdinT9Service : InputMethodService() {
 
             val rawX = event.getAxisValue(MotionEvent.AXIS_X)
             val rawY = event.getAxisValue(MotionEvent.AXIS_Y)
-            val magL = kotlin.math.sqrt((rawX * rawX + rawY * rawY).toDouble()).toFloat()
-
+            val magL = sqrt(rawX * rawX + rawY * rawY)
+            
             val rawZ = event.getAxisValue(MotionEvent.AXIS_Z)
             val rawRZ = event.getAxisValue(MotionEvent.AXIS_RZ)
-            val magR = kotlin.math.sqrt((rawZ * rawZ + rawRZ * rawRZ).toDouble()).toFloat()
+            val magR = sqrt(rawZ * rawZ + rawRZ * rawRZ)
 
             val useRightStick = magR > magL
             val x = if (useRightStick) rawZ else rawX
@@ -156,26 +165,36 @@ class OdinT9Service : InputMethodService() {
 
                     val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
                     
-                    // NEW: iPod Click-Wheel Pagination
-                    if (isPunctuationMode && radialLastOctant != -1) {
-                        // Clockwise crossover (Top-Left to Top) -> Next Page
+                    // 1. Calculate how many pages we actually have
+                    val maxPages = if (isPunctuationMode) 2 else kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
+                    
+                    // 2. Pagination Logic (iPod click-wheel style)
+                    if (radialLastOctant != -1) {
                         if (radialLastOctant == 7 && octant == 0) {
-                            radialPage = 1 
-                        }
-                        // Counter-Clockwise crossover (Top to Top-Left) -> Prev Page
-                        else if (radialLastOctant == 0 && octant == 7) {
-                            radialPage = 0
+                            radialPage = (radialPage + 1) % maxPages // Roll forward
+                        } else if (radialLastOctant == 0 && octant == 7) {
+                            radialPage = (radialPage - 1 + maxPages) % maxPages // Roll backward
                         }
                     }
-                    radialLastOctant = octant // Save for the next frame
+                    radialLastOctant = octant
                     
-                    // Pick the correct list to read from
+                    // 3. Slice the correct list based on the current page
                     val currentItems = if (isPunctuationMode) {
-                        if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
-                    } else currentPredictions
+                        if (radialPage == 0) punctuationsP1 else punctuationsP2
+                    } else {
+                        val start = radialPage * 8
+                        val end = kotlin.math.min(start + 8, currentPredictions.size)
+                        if (start < currentPredictions.size) currentPredictions.subList(start, end) else emptyList()
+                    }
                     
                     if (currentItems.isNotEmpty()) {
-                        radialSelectedIndex = octant.coerceAtMost(currentItems.size - 1)
+                        val newIndex = octant.coerceAtMost(currentItems.size - 1)
+                        
+                        // NEW: TRAVERSAL VIBRATION
+                        if (newIndex != radialSelectedIndex) {
+                            radialSelectedIndex = newIndex
+                            triggerHapticClick() // Premium tick as you roll the stick!
+                        }
                         updateUI()
                     }
                 }
@@ -189,10 +208,18 @@ class OdinT9Service : InputMethodService() {
         return super.onGenericMotionEvent(event)
     }
 
-    private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
+private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         val mapped = mapCircleToSquare(rawX, rawY)
 
+        // NEW: Vibrate on the ATTACK of the flick (surpassing 50% distance)
+        if (mag > 0.5f && !vibratedThisStroke) {
+            vibratedThisStroke = true
+            triggerHapticClick() 
+        }
+
         if (mag == 0.0f) {
+            vibratedThisStroke = false // NEW: Reset the tracker when stick returns to center
+
             // SNAPBACK: Find the sharpest point of the flick and save the letter
             if (currentStrokePath.isNotEmpty()) {
                 val maxPt = currentStrokePath.maxByOrNull { kotlin.math.sqrt(it.x * it.x + it.y * it.y) }
@@ -205,7 +232,6 @@ class OdinT9Service : InputMethodService() {
             return
         }
 
-        // ACTIVE MOVEMENT: Just record the path to find the max point later
         currentStrokePath.add(PointF(mapped.x, mapped.y))
         swipeDebugView.updateJoyT9Debug(currentStrokePath, emptyList(), wordProbabilities)
     }
@@ -226,12 +252,30 @@ class OdinT9Service : InputMethodService() {
         if (event.repeatCount > 0) return true
 
         // RADIAL UI: OPEN (Words OR Punctuation)
-        if (keyCode == RADIAL_KEY) {
+        if (keyCode == radialKey) {
             isRadialMenuOpen = true
             isPunctuationMode = currentPredictions.isEmpty() 
             radialSelectedIndex = 0 
-            radialPage = 0 // NEW: Always start on Page 1
-            radialLastOctant = -1 // NEW: Reset the boundary tracker
+            radialPage = 0 
+            radialLastOctant = -1 
+            
+            // --- THE SLIDE & POP ANIMATION ---
+            tvPredictions.animate().cancel() 
+            tvPredictions.alpha = 0f
+            tvPredictions.translationY = 30f // Start slightly pushed down
+            
+            // Reset scales just in case they were stuck
+            tvPredictions.scaleX = 1f 
+            tvPredictions.scaleY = 1f
+            
+            tvPredictions.animate()
+                .alpha(1f)
+                .translationY(0f) // Spring up into its resting position
+                .setDuration(200) 
+                .setInterpolator(OvershootInterpolator(1.5f)) // A slightly softer spring
+                .start()
+            // ----------------------------
+
             updateUI()
             return true
         }
@@ -254,14 +298,16 @@ class OdinT9Service : InputMethodService() {
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
 
         // RADIAL UI: COMMIT
-        if (keyCode == RADIAL_KEY) {
+        if (keyCode == radialKey) {
             if (isRadialMenuOpen) {
                 isRadialMenuOpen = false
 
-                val ic = currentInputConnection
+                // Cleanup the animation state
+                tvPredictions.animate().cancel()
+                tvPredictions.translationY = 0f // NEW: Reset the vertical slide
 
                 if (isPunctuationMode) {
-                    val items = if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
+                    val items = if (radialPage == 0) punctuationsP1 else punctuationsP2
                     saveUndoSnapshot()
                     currentInputConnection?.commitText(items[radialSelectedIndex], 1)
                 } else if (currentPredictions.isNotEmpty() && radialSelectedIndex < currentPredictions.size) {
@@ -318,6 +364,9 @@ class OdinT9Service : InputMethodService() {
             // }
             Action.ACCEPT -> {
                 saveUndoSnapshot()
+
+                triggerHapticClick()
+
                 val now = System.currentTimeMillis()
                 val ic = currentInputConnection ?: return
 
@@ -363,17 +412,33 @@ class OdinT9Service : InputMethodService() {
             }
             Action.BACKSPACE_WORD -> {
                 saveUndoSnapshot()
+
+                triggerHapticClick()
+
                 val textBefore = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
                 val spacesMatch = Regex("\\s+$").find(textBefore)
                 val spacesLen = spacesMatch?.value?.length ?: 0
-                val wordMatch = Regex("[^\\s]+\\s*$").find(textBefore)
+                val wordMatch = Regex("\\S+\\s*$").find(textBefore)
                 val deleteLen = wordMatch?.value?.length ?: spacesLen
                 if (deleteLen > 0) ic.deleteSurroundingText(deleteLen, 0)
             }
             Action.BACKSPACE_CHAR -> ic.deleteSurroundingText(1, 0)
             Action.ADD_SPACE -> {
                 saveUndoSnapshot()
-                ic.commitText(" ", 1)
+
+                triggerHapticClick()
+
+                if (currentPredictions.isNotEmpty()) {
+                    // If a word is queued up, accept it AND add a space
+                    val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+                    ic.commitText(wordToCommit, 1)
+                    if (autoSpace) ic.commitText(" ", 1)
+                    lastAcceptTime = System.currentTimeMillis()
+                    resetState()
+                } else {
+                    // Otherwise, just add a space
+                    ic.commitText(" ", 1)
+                }
             }
             Action.CLEAR_TEXT -> {
                 saveUndoSnapshot()
@@ -394,7 +459,6 @@ class OdinT9Service : InputMethodService() {
             }
             Action.ENTER -> {
                 saveUndoSnapshot()
-                val ic = currentInputConnection ?: return
                 val editorInfo = currentInputEditorInfo
                 
                 if (editorInfo != null) {
@@ -414,22 +478,9 @@ class OdinT9Service : InputMethodService() {
                 // Optional: If you want the keyboard to forcefully hide itself after pressing Enter
                 // requestHideSelf(0) 
             }
-            Action.ADD_SPACE -> {
-                saveUndoSnapshot()
-                val ic = currentInputConnection ?: return
-                
-                if (currentPredictions.isNotEmpty()) {
-                    // If a word is queued up, accept it AND add a space
-                    ic.commitText(currentPredictions[predictionIndex], 1)
-                    ic.commitText(" ", 1)
-                    lastAcceptTime = System.currentTimeMillis()
-                    resetState()
-                } else {
-                    // Otherwise, just add a space
-                    ic.commitText(" ", 1)
-                }
-            }
             Action.BACKSPACE_STROKE -> {
+                triggerHapticClick()
+
                 if (wordProbabilities.isNotEmpty()) {
                     // COMPOSING MODE: Delete the last joystick flick
                     wordProbabilities.removeAt(wordProbabilities.size - 1)
@@ -462,42 +513,55 @@ class OdinT9Service : InputMethodService() {
         currentPredictions = emptyList()
         predictionIndex = 0
         swipeDebugView.clear()
-        tvPredictions.text = "JoyJoy Ready"
+        tvPredictions.text = "..."
         isRadialMenuOpen = false
         isPunctuationMode = false
         radialPage = 0
         radialLastOctant = -1
+        vibratedThisStroke = false
     }
 
     private fun updateUI() {
         if (currentPredictions.isEmpty() && !isRadialMenuOpen) {
-            tvPredictions.text = "JoyJoy Ready"
+            tvPredictions.text = "..."
             return
         }
         
+        // 1. Slice the lists for drawing
+        val itemsToDraw = if (isRadialMenuOpen) {
+            if (isPunctuationMode) {
+                if (radialPage == 0) punctuationsP1 else punctuationsP2
+            } else {
+                val start = radialPage * 8
+                val end = kotlin.math.min(start + 8, currentPredictions.size)
+                if (start < currentPredictions.size) currentPredictions.subList(start, end) else emptyList()
+            }
+        } else currentPredictions
+
+        // 2. Format the text
         var display = if (isRadialMenuOpen) {
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
-            val items = if (isPunctuationMode) {
-                if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
-            } else currentPredictions
-            
-            items.mapIndexed { index, word ->
+            itemsToDraw.mapIndexed { index, word ->
                 val dir = if (index < arrows.size) arrows[index] else ""
                 if (index == radialSelectedIndex) "<b><font color='#FFA500'>[$dir $word]</font></b>" 
                 else "<font color='#555555'>$dir $word</font>"
             }.joinToString("   ")
         } else {
-            currentPredictions.mapIndexed { index, word ->
-                if (index == predictionIndex) "<b><font color='#A3FF00'>[$word]</font></b>" else word
+            itemsToDraw.mapIndexed { index, word ->
+                if (index == predictionIndex) "<b><font color='#A3FF00'>[$word]</font></b>" 
+                else "<font color='#777777'>$word</font>" 
             }.joinToString("   ")
         }
-        
-        // NEW: Add the Page Indicator if we are in the Punctuation Menu
-        if (isRadialMenuOpen && isPunctuationMode) {
-            display += "   <font color='#888888'><i>[Pg ${radialPage + 1}/2]</i></font>"
+
+        // 3. Add dynamic pagination text
+        if (isRadialMenuOpen) {
+            val maxPages = if (isPunctuationMode) 2 else kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
+            if (maxPages > 1) {
+                display += "   <font color='#888888'><i>[Pg ${radialPage + 1}/$maxPages]</i></font>"
+            }
         }
         
-        tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
+        tvPredictions.text = Html.fromHtml(display, Html.FROM_HTML_MODE_LEGACY)
     }
 
     private fun generateProbabilityMap(pt: PointF): Map<Char, Float> {
@@ -506,7 +570,7 @@ class OdinT9Service : InputMethodService() {
         var sum = 0f
         for ((digit, center) in t9Centers) {
             val dist = getDistance(center, pt.x, pt.y)
-            val p = Math.exp(-(dist * dist) / (2 * sigma * sigma).toDouble()).toFloat()
+            val p = kotlin.math.exp(-(dist * dist) / (2 * sigma * sigma).toDouble()).toFloat()
             probs[digit] = p
             sum += p
         }
@@ -515,22 +579,22 @@ class OdinT9Service : InputMethodService() {
 
     private fun mapCircleToSquare(u: Float, v: Float): PointF {
         if (u == 0f && v == 0f) return PointF(0f, 0f)
-        val radius = sqrt((u * u + v * v).toDouble()).toFloat()
+        val radius = sqrt(u * u + v * v)
         val normalizedRadius = radius.coerceAtMost(1f)
-        val theta = atan2(v.toDouble(), u.toDouble()).toFloat()
-        val cosTheta = abs(Math.cos(theta.toDouble())).toFloat()
-        val sinTheta = abs(Math.sin(theta.toDouble())).toFloat()
+        val theta = atan2(v, u)
+        val cosTheta = abs(kotlin.math.cos(theta))
+        val sinTheta = abs(kotlin.math.sin(theta))
         val scale = 1f / max(cosTheta, sinTheta)
         val mappedRadius = normalizedRadius * scale
-        val x = mappedRadius * Math.cos(theta.toDouble()).toFloat()
-        val y = mappedRadius * Math.sin(theta.toDouble()).toFloat()
+        val x = mappedRadius * kotlin.math.cos(theta)
+        val y = mappedRadius * kotlin.math.sin(theta)
         return PointF(x.coerceIn(-1f, 1f), y.coerceIn(-1f, 1f))
     }
 
     private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
-        return sqrt(Math.pow((x2 - p1.x).toDouble(), 2.0) + Math.pow((y2 - p1.y).toDouble(), 2.0)).toFloat()
+        return sqrt((x2 - p1.x) * (x2 - p1.x) + (y2 - p1.y) * (y2 - p1.y))
     }
-    
+
     private fun getCapitalizedWord(word: String): String {
         if (!autoCap) return word
         
@@ -563,5 +627,17 @@ class OdinT9Service : InputMethodService() {
         }
         
         return word
+    }
+
+    private fun triggerHapticClick() {
+        if (!vibrateOnType || !vibrator.hasVibrator()) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // Force exact milliseconds, and force MAXIMUM amplitude (255)
+            vibrator.vibrate(VibrationEffect.createOneShot(vibrateDuration, 255))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(vibrateDuration)
+        }
     }
 }

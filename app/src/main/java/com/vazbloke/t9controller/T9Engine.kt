@@ -15,6 +15,7 @@ class TrieNode(
 
 class T9Engine {
     private val charToDigit = mapOf(
+        '\'' to '1', // NEW: Map apostrophe to the '1' direction
         'a' to '2', 'b' to '2', 'c' to '2',
         'd' to '3', 'e' to '3', 'f' to '3',
         'g' to '4', 'h' to '4', 'i' to '4',
@@ -26,6 +27,7 @@ class T9Engine {
     )
 
     private val digitToChars = mapOf(
+        '1' to listOf('\''), // NEW: '1' now outputs an apostrophe
         '2' to listOf('a', 'b', 'c'),
         '3' to listOf('d', 'e', 'f'),
         '4' to listOf('g', 'h', 'i'),
@@ -48,7 +50,8 @@ class T9Engine {
                 val parts = line.split("\t", ",")
                 if (parts.isNotEmpty()) {
                     val word = parts[0].lowercase()
-                    if (word.all { it in 'a'..'z' }) {
+                    // FIX: Allow apostrophes through the filter!
+                    if (word.all { it in 'a'..'z' || it == '\'' }) {
                         val freq = if (parts.size > 1) parts[1].toIntOrNull() ?: 0 else 0
                         insertWord(word, freq)
                         allWordsList.add(word)
@@ -66,7 +69,8 @@ class T9Engine {
                     val parts = line.split("\t", ",")
                     if (parts.isNotEmpty()) {
                         val word = parts[0].trim().lowercase()
-                        if (word.isNotEmpty() && word.all { it in 'a'..'z' }) {
+                        // FIX: Allow apostrophes here too
+                        if (word.isNotEmpty() && word.all { it in 'a'..'z' || it == '\'' }) {
                             insertWord(word, 999999)
                             allWordsList.add(word)
                         }
@@ -74,8 +78,14 @@ class T9Engine {
                 }
             }
         } catch (e: Exception) { e.printStackTrace() }
-    }
 
+        // 3. FIX: Hardcode foundational 1-letter words so they never fail
+        insertWord("i", 999999)
+        insertWord("a", 999999)
+        if (!allWordsList.contains("i")) allWordsList.add("i")
+        if (!allWordsList.contains("a")) allWordsList.add("a")
+    }
+    
     private fun insertWord(word: String, frequency: Int) {
         var current = root
         for (char in word) {
@@ -96,20 +106,27 @@ class T9Engine {
      * Takes a list of probability maps (one map per joystick inflection).
      * Explores the Trie, dropping highly improbable paths.
      */
-    fun getProbabilisticPredictions(inputProbabilities: List<Map<Char, Float>>, beamWidth: Int = 50): List<String> { // Increased width
+
+    // UPDATE THIS FUNCTION SIGNATURE AND LOGIC
+    // Notice it now takes inputProbabilities of specific letters, not digits
+
+    fun getProbabilisticPredictions(inputProbabilities: List<Map<Char, Float>>, beamWidth: Int = 50): List<String> {
         if (inputProbabilities.isEmpty()) return emptyList()
 
-        // State: (CurrentNode, WordSoFar, CumulativeLogProbability)
         var beam = listOf(Triple(root, "", 0.0f))
+
+        // The Forgiveness Dial
+        val freqWeight = 1.5f
 
         for (probabilityMap in inputProbabilities) {
             val nextBeam = mutableListOf<Triple<TrieNode, String, Float>>()
 
             for ((node, wordSoFar, logProb) in beam) {
-                // For every possible digit the user might have meant
+                // REVERTED: We are iterating over DIGITS again!
                 for ((digit, prob) in probabilityMap) {
-                    if (prob < 0.02f) continue // Prune absolute noise
+                    if (prob < 0.01f) continue
 
+                    // Map the digit back to its letters (e.g. '5' -> 'j', 'k', 'l')
                     val chars = digitToChars[digit] ?: continue
                     val transitionLogProb = kotlin.math.log(prob.toDouble(), 10.0).toFloat()
 
@@ -123,25 +140,27 @@ class T9Engine {
                 }
             }
 
-            // FIX: Sort by combined joystick probability AND word frequency heuristic
             beam = nextBeam.sortedByDescending {
-                it.third + kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat()
+                it.third + (freqWeight * kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat())
             }.take(beamWidth)
 
             if (beam.isEmpty()) break
         }
 
-        // Return the words from valid terminal nodes, sorted by their frequency and probability
         return beam.filter { it.first.isWord }
-            .sortedByDescending { it.third + kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat() }
+            .sortedByDescending { it.third + (freqWeight * kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat()) }
             .map { it.second }
+            .take(6) // Clutter control
     }
-    
+
     // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)
     fun getPredictions(sequence: String): List<String> {
+        // REVERTED: Back to mapping raw digits
         val deterministicProbs = sequence.map { digit -> mapOf(digit to 1.0f) }
         return getProbabilisticPredictions(deterministicProbs)
     }
+
+ // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)
 
     fun getCharsForDigit(digit: Char): List<Char> = digitToChars[digit] ?: emptyList()
     fun getAllWords(): List<String> = allWordsList

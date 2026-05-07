@@ -24,9 +24,16 @@ class OdinT9Service : InputMethodService() {
     private val swipeEngine = SwipeEngine()
     private lateinit var prefs: SharedPreferences
 
+    private val currentStrokePath = mutableListOf<PointF>()
+
     // --- Hybrid State ---
     private var isTriggerHeld = false
-    private val currentStrokePath = mutableListOf<PointF>()
+    private var isJklModifierHeld = false // NEW: Tracks the M1/M2 button
+
+    // Most controllers map the extra C/Z buttons to these:
+    private val MODIFIER_KEY_1 = KeyEvent.KEYCODE_BUTTON_C
+    private val MODIFIER_KEY_2 = KeyEvent.KEYCODE_BUTTON_Z
+
     private val wordProbabilities = mutableListOf<Map<Char, Float>>()
 
     private var joyAngleSum = 0f
@@ -40,6 +47,7 @@ class OdinT9Service : InputMethodService() {
     private var triggerKey = KeyEvent.KEYCODE_BUTTON_L1
     private val keyBindings = mutableMapOf<Int, Action>()
     private val undoStack = java.util.Stack<CharSequence>()
+
 
     enum class Action {
         CYCLE_FWD, CYCLE_BACK, ACCEPT, CYCLE_PREV,
@@ -130,7 +138,7 @@ class OdinT9Service : InputMethodService() {
                     if (!circleDetectedThisStroke) {
                         val maxPt = currentStrokePath.maxByOrNull { sqrt(it.x * it.x + it.y * it.y) }
                         if (maxPt != null && sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
-                            wordProbabilities.add(generateProbabilityMap(maxPt))
+                            wordProbabilities.add(generateProbabilityMap(maxPt)) // Reverted to Digits
                         }
                     }
                     currentStrokePath.clear()
@@ -162,9 +170,7 @@ class OdinT9Service : InputMethodService() {
             circleDetectedThisStroke = true
             val fiveMap = t9Centers.keys.associateWith { if (it == '5') 0.95f else 0.005f }
             wordProbabilities.add(fiveMap)
-            joyAngleSum = 0f // Reset to allow multiple 5s if they keep spinning
-
-            // Note: We deliberately do NOT clear currentStrokePath here so the visual line continues unbroken.
+            joyAngleSum = 0f
             updateLivePredictions()
         }
 
@@ -185,7 +191,7 @@ class OdinT9Service : InputMethodService() {
         if (isTriggerHeld && currentStrokePath.isNotEmpty()) {
             activeInflections = swipeEngine.extractInflectionPoints(currentStrokePath)
             for (point in activeInflections) {
-                if (abs(point.x) < 0.1f && abs(point.y) < 0.1f) continue
+                if (kotlin.math.abs(point.x) < 0.1f && kotlin.math.abs(point.y) < 0.1f) continue
                 tempProbabilities.add(generateProbabilityMap(point))
             }
         }
@@ -203,7 +209,14 @@ class OdinT9Service : InputMethodService() {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
         if (event.repeatCount > 0) return true
 
+        // INTERCEPT MODIFIER PRESS
+        if (keyCode == MODIFIER_KEY_1 || keyCode == MODIFIER_KEY_2) {
+            isJklModifierHeld = true
+            return true
+        }
+
         if (keyCode == triggerKey) {
+// ... rest of your code
             isTriggerHeld = true
             return true
         }
@@ -218,7 +231,14 @@ class OdinT9Service : InputMethodService() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        // INTERCEPT MODIFIER RELEASE
+        if (keyCode == MODIFIER_KEY_1 || keyCode == MODIFIER_KEY_2) {
+            isJklModifierHeld = false
+            return true
+        }
+
         if (keyCode == triggerKey) {
+// ... rest of your code
             isTriggerHeld = false
 
             // Finalize the active swipe stroke upon releasing the trigger
@@ -226,7 +246,7 @@ class OdinT9Service : InputMethodService() {
                 val inflections = swipeEngine.extractInflectionPoints(currentStrokePath)
                 for (point in inflections) {
                     if (abs(point.x) < 0.1f && abs(point.y) < 0.1f) continue
-                    wordProbabilities.add(generateProbabilityMap(point))
+                    wordProbabilities.add(generateProbabilityMap(point)) // Reverted to Digits
                 }
                 currentStrokePath.clear()
                 updateLivePredictions()
@@ -324,6 +344,7 @@ class OdinT9Service : InputMethodService() {
         isTriggerHeld = false
         currentStrokePath.clear()
         wordProbabilities.clear()
+        // ... rest of resetState
         circleDetectedThisStroke = false
         currentPredictions = emptyList()
         predictionIndex = 0
@@ -343,6 +364,18 @@ class OdinT9Service : InputMethodService() {
     }
 
     private fun generateProbabilityMap(pt: PointF): Map<Char, Float> {
+        // --- NEW: HARDWARE OVERRIDE ---
+        if (isJklModifierHeld) {
+            // If M1/M2 is held, ignore the joystick angle completely.
+            // Return 100% probability for '5' and 0% for everything else.
+            val overrideProbs = mutableMapOf<Char, Float>()
+            for (digit in t9Centers.keys) {
+                overrideProbs[digit] = if (digit == '5') 1.0f else 0.0f
+            }
+            return overrideProbs
+        }
+
+        // --- NORMAL JOYSTICK MATH ---
         val sigma = 0.55f
         val probs = mutableMapOf<Char, Float>()
         var sum = 0f

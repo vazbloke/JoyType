@@ -69,25 +69,28 @@ class OdinT9Service : InputMethodService() {
     private var lastCursorMoveTime = 0L
 
     private lateinit var tvPredictions: TextView
-    private lateinit var hsvPredictions: android.widget.HorizontalScrollView // NEW
+    private lateinit var hsvPredictions: android.widget.HorizontalScrollView
 
-    enum class ModifierKey { NONE, M1, M2 }
+    enum class ModifierKey { NONE, M1, M2, M3 }
     
     // Replace your old Action enum mapping with a KeyCombo map
     data class KeyCombo(val keyCode: Int, val modifier: ModifierKey)
     private val keyBindings = mutableMapOf<KeyCombo, Action>()
 
     enum class Action {
-        ACCEPT, CYCLE_PREV, BACKSPACE_WORD, BACKSPACE_CHAR, BACKSPACE_STROKE, 
+        ACCEPT, CYCLE_PREV, BACKSPACE_WORD, BACKSPACE_STROKE, 
         ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, ENTER, 
-        CLOSE_KEYBOARD // NEW
+        CLOSE_KEYBOARD, CURSOR_WORD_LEFT, CURSOR_WORD_RIGHT,
+        CYCLE_FWD, CYCLE_BACK // NEW
     }
 
     // Modifier State
     private var isM1Held = false
     private var isM2Held = false
+    private var isM3Held = false
     private var m1KeyCode = KeyEvent.KEYCODE_BUTTON_C
     private var m2KeyCode = KeyEvent.KEYCODE_BUTTON_Z
+    private var m3KeyCode = -1
     
     private var radialModifier = ModifierKey.M1
     private var cursorModifier = ModifierKey.M2
@@ -101,6 +104,33 @@ class OdinT9Service : InputMethodService() {
     // Clickwheel
     private var isPeggedAtStart = false
     private var isPeggedAtEnd = false
+
+    // --- Cursor Glide State ---
+    private val cursorHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var isCursorGliding = false
+    private var cursorX = 0f
+    private var cursorY = 0f
+    private var cursorMag = 0f
+
+    private val cursorGlideRunnable = object : Runnable {
+        override fun run() {
+            if (!isCursorGliding) return
+            val ic = currentInputConnection ?: return
+            
+            // Analog Speed Math: Hard push = 30ms delay (fast), Soft push = 200ms delay (slow)
+            val delay = 200L - (cursorMag * 170L).toLong()
+            
+            if (kotlin.math.abs(cursorX) > kotlin.math.abs(cursorY)) {
+                if (cursorX > 0) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT))
+                else ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
+            } else {
+                if (cursorY > 0) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN))
+                else ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP))
+            }
+            
+            cursorHandler.postDelayed(this, delay.coerceAtLeast(20L))
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -132,9 +162,23 @@ class OdinT9Service : InputMethodService() {
         // Load Modifiers
         m1KeyCode = prefs.getInt("key_mod_1", KeyEvent.KEYCODE_BUTTON_C)
         m2KeyCode = prefs.getInt("key_mod_2", KeyEvent.KEYCODE_BUTTON_Z)
+        m3KeyCode = prefs.getInt("key_mod_3", -1)
+
+        val radialStr = prefs.getString("joy_radial_mod", "NONE")
+        radialModifier = when(radialStr) {
+            "M1" -> ModifierKey.M1
+            "M2" -> ModifierKey.M2
+            "M3" -> ModifierKey.M3
+            else -> ModifierKey.NONE
+        }
         
-        radialModifier = if (prefs.getString("joy_radial_mod", "M1") == "M2") ModifierKey.M2 else ModifierKey.M1
-        cursorModifier = if (prefs.getString("joy_cursor_mod", "M2") == "M1") ModifierKey.M1 else ModifierKey.M2
+        val cursorStr = prefs.getString("joy_cursor_mod", "NONE")
+        cursorModifier = when(cursorStr) {
+            "M1" -> ModifierKey.M1
+            "M2" -> ModifierKey.M2
+            "M3" -> ModifierKey.M3
+            else -> ModifierKey.NONE
+        }
 
         keyBindings.clear()
 
@@ -157,7 +201,6 @@ class OdinT9Service : InputMethodService() {
         bind(Action.ACCEPT, "key_accept", "mod_accept", KeyEvent.KEYCODE_BUTTON_R1)
         bind(Action.CYCLE_PREV, "key_cycle_prev", "mod_cycle_prev", KeyEvent.KEYCODE_BUTTON_X)
         bind(Action.BACKSPACE_WORD, "key_backspace_word", "mod_backspace_word", KeyEvent.KEYCODE_BUTTON_Y)
-        bind(Action.BACKSPACE_CHAR, "key_backspace_char", "mod_backspace_char", -1) 
         bind(Action.BACKSPACE_STROKE, "key_backspace_stroke", "mod_backspace_stroke", KeyEvent.KEYCODE_BUTTON_B)
         bind(Action.ADD_SPACE, "key_add_space", "mod_add_space", KeyEvent.KEYCODE_BUTTON_A)
         bind(Action.CLEAR_TEXT, "key_clear_text", "mod_clear_text", -1)
@@ -170,14 +213,21 @@ class OdinT9Service : InputMethodService() {
     override fun onCreateInputView(): View {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)
-        hsvPredictions = view.findViewById(R.id.hsv_predictions)
-
         swipeDebugView = view.findViewById(R.id.swipe_debug_view)
         
-        // NEW: Respect the visual debug setting on boot
+        // THE FIX: Hook up the scroll view so it doesn't crash!
+        hsvPredictions = view.findViewById(R.id.hsv_predictions) 
+        
         swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         tvPredictions.text = "..."
 
+        // Toast instruction
+        tvPredictions.setOnClickListener {
+            if (tvPredictions.text.toString() == "...") {
+                android.widget.Toast.makeText(this, "Flick joystick to start typing", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+        
         return view
     }
 
@@ -280,37 +330,27 @@ class OdinT9Service : InputMethodService() {
             }
 
             // --- CURSOR MODIFIER INTERCEPT ---
-            val isCursorActive = (cursorModifier == ModifierKey.M1 && isM1Held) || (cursorModifier == ModifierKey.M2 && isM2Held)
-    
+            val isCursorActive = cursorModifier != ModifierKey.NONE && (
+                (cursorModifier == ModifierKey.M1 && isM1Held) || 
+                (cursorModifier == ModifierKey.M2 && isM2Held) || 
+                (cursorModifier == ModifierKey.M3 && isM3Held)
+            )
+
             if (isCursorActive) {
-                if (mag > 0.2f) { // Slight deadzone
-                    val now = System.currentTimeMillis()
-                    
-                    // Analog Speed: Hard push = 50ms delay, Soft push = 150ms delay
-                    val delay = 150L - (mag * 100L).toLong() 
-                    
-                    if (now - lastCursorMoveTime > delay) {
-                        val ic = currentInputConnection
-                        if (ic != null) {
-                            // Determine if the user is pushing mostly horizontal or vertical
-                            if (kotlin.math.abs(x) > kotlin.math.abs(y)) {
-                                if (x > 0) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT))
-                                else ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
-                            } else {
-                                if (y > 0) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN))
-                                else ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP))
-                            }
-                            
-                            // A tiny micro-vibration so you can "feel" the cursor jumping lines
-                            if (vibrateOnType && vibrator.hasVibrator()) {
-                                @Suppress("DEPRECATION")
-                                vibrator.vibrate(5L) 
-                            }
-                            lastCursorMoveTime = now
-                        }
+                if (mag > 0.2f) { // Deadzone
+                    cursorX = x
+                    cursorY = y
+                    cursorMag = mag
+                    if (!isCursorGliding) {
+                        isCursorGliding = true
+                        cursorHandler.post(cursorGlideRunnable) // Start gliding!
                     }
+                } else {
+                    isCursorGliding = false // Stop gliding
                 }
-                return true // Stop standard typing math!
+                return true
+            } else {
+                isCursorGliding = false
             }
 
             // --- NORMAL T9 TYPING ---
@@ -361,15 +401,34 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
-        if (event.repeatCount > 0) return true
+
+        // NEW: Check if it's a D-pad key
+        val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
+        
+        // Eat held buttons (to prevent machine-gunning inputs), EXCEPT for the D-pad!
+        if (event.repeatCount > 0 && !isDPad) return true
+
+        // D-PAD TEXT CURSOR PASSTHROUGH
+        if (isDPad) {
+            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            return true
+        }
 
         // Track Modifiers
         if (keyCode == m1KeyCode) isM1Held = true
         if (keyCode == m2KeyCode) isM2Held = true
+        if (keyCode == m3KeyCode) isM3Held = true
 
         // Radial Menu Intercept
-        val targetRadialKey = if (radialModifier == ModifierKey.M1) m1KeyCode else m2KeyCode
-        if (keyCode == targetRadialKey) {
+        val targetRadialKey = when (radialModifier) {
+            ModifierKey.M1 -> m1KeyCode
+            ModifierKey.M2 -> m2KeyCode
+            ModifierKey.M3 -> m3KeyCode
+            else -> -1
+        }
+
+        // Ensure it doesn't trigger if targetRadialKey is -1 (NONE selected)
+        if (targetRadialKey != -1 && keyCode == targetRadialKey) {
             isRadialMenuOpen = true
             isPunctuationMode = currentPredictions.isEmpty()
             radialSelectedIndex = 0
@@ -386,7 +445,7 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         }
 
         // Action Check
-        val currentMod = if (isM1Held) ModifierKey.M1 else if (isM2Held) ModifierKey.M2 else ModifierKey.NONE
+        val currentMod = if (isM1Held) ModifierKey.M1 else if (isM2Held) ModifierKey.M2 else if (isM3Held) ModifierKey.M3 else ModifierKey.NONE
         val action = keyBindings[KeyCombo(keyCode, currentMod)]
         
         if (action != null) {
@@ -405,9 +464,17 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         
+        // D-PAD TEXT CURSOR PASSTHROUGH
+        val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
+        if (isDPad) {
+            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            return true
+        }
+
         // Track Modifier Releases
         if (keyCode == m1KeyCode) isM1Held = false
         if (keyCode == m2KeyCode) isM2Held = false
+        if (keyCode == m3KeyCode) isM3Held = false
 
         // RADIAL UI: COMMIT
         val targetRadialKey = if (radialModifier == ModifierKey.M1) m1KeyCode else m2KeyCode
@@ -459,35 +526,56 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         when (action) {
             Action.ACCEPT -> {
                 saveUndoSnapshot()
-
                 triggerHapticClick()
-
                 val now = System.currentTimeMillis()
                 val ic = currentInputConnection ?: return
 
                 if (currentPredictions.isNotEmpty()) {
-                    // THE FIX: Check capitalization before committing!
                     val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
                     ic.commitText(wordToCommit, 1)
-                    
                     if (autoSpace) ic.commitText(" ", 1)
                     lastAcceptTime = now
                 } else {
-                    // Empty Accept - Check for Double Tap!
+                    // FIX: Robust Double-Tap Period
                     if (doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
-                        val textBefore = ic.getTextBeforeCursor(2, 0)?.toString()
-                        if (textBefore?.endsWith(" ") == true) {
-                            ic.deleteSurroundingText(1, 0) // Delete the space
+                        val textBefore = ic.getTextBeforeCursor(10, 0)?.toString() ?: ""
+                        // Hunt down any trailing spaces regardless of how many there are
+                        val spacesMatch = Regex("\\s+$").find(textBefore) 
+                        if (spacesMatch != null) {
+                            ic.deleteSurroundingText(spacesMatch.value.length, 0)
                         }
                         ic.commitText(". ", 1)
-                        lastAcceptTime = 0L // Reset
+                        lastAcceptTime = 0L 
                     } else {
-                        // Standard space addition
                         ic.commitText(" ", 1)
                         lastAcceptTime = now
                     }
                 }
                 resetState()
+            }
+            Action.BACKSPACE_WORD -> {
+                triggerHapticClick()
+
+                if (wordProbabilities.isNotEmpty()) {
+                    // COMPOSING MODE: Nuke the entire active input thread
+                    wordProbabilities.clear()
+                    currentStrokePath.clear()
+                    updateLivePredictions()
+                } else {
+                    // NORMAL MODE: Delete the whole word in the text box
+                    saveUndoSnapshot()
+                    val textBefore = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
+                    
+                    if (textBefore.endsWith("\n")) {
+                        ic.deleteSurroundingText(1, 0)
+                    } else {
+                        val spacesMatch = Regex("[ \\t]+$").find(textBefore) 
+                        val spacesLen = spacesMatch?.value?.length ?: 0
+                        val wordMatch = Regex("\\S+[ \\t]*$").find(textBefore)
+                        val deleteLen = wordMatch?.value?.length ?: spacesLen
+                        if (deleteLen > 0) ic.deleteSurroundingText(deleteLen, 0)
+                    }
+                }
             }
             Action.CYCLE_PREV -> {
                 saveUndoSnapshot()
@@ -505,26 +593,6 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                     }
                 }
             }
-            Action.BACKSPACE_WORD -> {
-                triggerHapticClick()
-
-                if (wordProbabilities.isNotEmpty()) {
-                    // COMPOSING MODE: Nuke the entire active input thread
-                    wordProbabilities.clear()
-                    currentStrokePath.clear()
-                    updateLivePredictions()
-                } else {
-                    // NORMAL MODE: Delete the whole word in the text box
-                    saveUndoSnapshot()
-                    val textBefore = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
-                    val spacesMatch = Regex("\\s+$").find(textBefore)
-                    val spacesLen = spacesMatch?.value?.length ?: 0
-                    val wordMatch = Regex("\\S+\\s*$").find(textBefore)
-                    val deleteLen = wordMatch?.value?.length ?: spacesLen
-                    if (deleteLen > 0) ic.deleteSurroundingText(deleteLen, 0)
-                }
-            }
-            Action.BACKSPACE_CHAR -> ic.deleteSurroundingText(1, 0)
             Action.ADD_SPACE -> {
                 saveUndoSnapshot()
 
@@ -596,6 +664,35 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             Action.CLOSE_KEYBOARD -> {
                 triggerHapticClick()
                 requestHideSelf(0)
+            }
+            Action.CURSOR_WORD_LEFT -> {
+                triggerHapticClick()
+                val textBefore = ic.getTextBeforeCursor(100, 0)?.toString() ?: return
+                val match = Regex("\\s*\\S+\\s*$").find(textBefore)
+                val jumpLength = match?.value?.length ?: textBefore.length
+                for(i in 0 until jumpLength) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
+            }
+            Action.CURSOR_WORD_RIGHT -> {
+                triggerHapticClick()
+                val textAfter = ic.getTextAfterCursor(100, 0)?.toString() ?: return
+                val match = Regex("^\\s*\\S+").find(textAfter)
+                val jumpLength = match?.value?.length ?: textAfter.length
+                for(i in 0 until jumpLength) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT))
+            }
+            Action.CYCLE_FWD -> {
+                if (currentPredictions.isNotEmpty()) {
+                    triggerHapticClick()
+                    predictionIndex = (predictionIndex + 1) % currentPredictions.size
+                    updateUI()
+                }
+            }
+            Action.CYCLE_BACK -> {
+                if (currentPredictions.isNotEmpty()) {
+                    triggerHapticClick()
+                    // Add currentPredictions.size to prevent negative modulo results!
+                    predictionIndex = (predictionIndex - 1 + currentPredictions.size) % currentPredictions.size
+                    updateUI()
+                }
             }
             Action.NONE -> {}
         }

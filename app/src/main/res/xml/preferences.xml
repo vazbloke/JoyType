@@ -25,22 +25,6 @@
             android:defaultValue="true" />
     </androidx.preference.PreferenceCategory>
 
-    <androidx.preference.PreferenceCategory android:title="Key Bindings">
-        <androidx.preference.Preference android:key="key_trigger" android:title="Word Boundary Trigger Key (Hold to Swipe)" />
-        <androidx.preference.Preference android:key="key_cycle_fwd" android:title="Cycle Prediction Forward" />
-        <androidx.preference.Preference android:key="key_cycle_back" android:title="Cycle Prediction Backward" />
-        <androidx.preference.Preference android:key="key_accept" android:title="Accept Prediction" />
-        <androidx.preference.Preference android:key="key_cycle_prev" android:title="Cycle Previously Accepted Word" />
-        <androidx.preference.Preference android:key="key_backspace_word" android:title="Backspace Entire Word" />
-        <androidx.preference.Preference android:key="key_backspace_char" android:title="Backspace Single Character (Legacy)" />
-        <androidx.preference.Preference android:key="key_backspace_stroke" android:title="Backspace Active Stroke / Character" />
-        <androidx.preference.Preference android:key="key_add_space" android:title="Add Space" />
-        <androidx.preference.Preference android:key="key_clear_text" android:title="Clear Entire Textbox" />
-        <androidx.preference.Preference android:key="key_enter" android:title="Enter / Send / Go" />
-        <androidx.preference.Preference android:key="key_undo" android:title="Undo Last Operation" />
-        <androidx.preference.Preference android:key="key_open_settings" android:title="Open Settings" />
-    </androidx.preference.PreferenceCategory>
-
     <androidx.preference.PreferenceCategory android:title="Haptics &amp; Feedback">
         <androidx.preference.SwitchPreferenceCompat
             android:key="vibrate_on_type"
@@ -56,5 +40,40 @@
             app:defaultValue="25"
             app:showSeekBarValue="true" />
     </androidx.preference.PreferenceCategory>
+
+    <androidx.preference.PreferenceCategory android:title="Modifier Keys">
+        <com.vazbloke.t9controller.LongClickPreference android:key="key_mod_1" android:title="Modifier 1 (M1) Key" />
+        <com.vazbloke.t9controller.LongClickPreference android:key="key_mod_2" android:title="Modifier 2 (M2) Key" />
+        <com.vazbloke.t9controller.LongClickPreference android:key="key_mod_3" android:title="Modifier 3 (M3) Key" />
+    </androidx.preference.PreferenceCategory>
+
+    <androidx.preference.PreferenceCategory android:title="Joystick Bindings">
+        <com.vazbloke.t9controller.InlineSpinnerPreference
+            android:key="joy_radial_mod"
+            android:title="Radial Prediction Selection"
+            app:summary="Select the modifier required to open the radial word/punctuation menu"
+            android:defaultValue="M1" />
+            
+        <com.vazbloke.t9controller.InlineSpinnerPreference
+            android:key="joy_cursor_mod"
+            android:title="Cursor Control"
+            app:summary="Select the modifier required to move the text cursor with the analog stick"
+            android:defaultValue="M2" />
+    </androidx.preference.PreferenceCategory>
+
+    <PreferenceCategory android:title="Key Bindings">
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_accept" android:title="Accept Prediction" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_cycle_prev" android:title="Cycle Previously Accepted Word" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_backspace_word" android:title="Backspace Entire Word" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_backspace_stroke" android:title="Backspace Active Stroke / Character" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_add_space" android:title="Add Space" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_clear_text" android:title="Clear Entire Textbox" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_enter" android:title="Enter / Send / Go" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_undo" android:title="Undo Last Operation" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_close" android:title="Close Keyboard" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_cycle_fwd" android:title="Cycle Prediction Forward" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_cycle_back" android:title="Cycle Prediction Backward" />
+        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_open_settings" android:title="Open Settings" />
+    </PreferenceCategory>
 
 </androidx.preference.PreferenceScreen>

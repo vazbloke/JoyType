@@ -5,71 +5,103 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.util.AttributeSet
 import android.view.KeyEvent
-import android.view.View
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
-import android.widget.Spinner
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.PreferenceManager
 import androidx.preference.PreferenceViewHolder
 
-// --- Preference for Action Keys (Has Bindable Key + Spinner) ---
-class KeyBindingPreference(context: Context, attrs: AttributeSet?) : Preference(context, attrs) {
-    init { widgetLayoutResource = R.layout.widget_modifier_spinner }
-    var currentModifier: String = "NONE"
-    var onModifierChanged: ((String) -> Unit)? = null
-
+class LongClickPreference(context: Context, attrs: AttributeSet?) : Preference(context, attrs) {
+    var onPreferenceLongClick: (() -> Unit)? = null
     override fun onBindViewHolder(holder: PreferenceViewHolder) {
         super.onBindViewHolder(holder)
-        val spinner = holder.findViewById(R.id.mod_spinner) as? Spinner
-        spinner?.let {
-            val adapter = ArrayAdapter(context, R.layout.spinner_item_small, arrayOf("NONE", "M1", "M2"))
-            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            it.adapter = adapter
-            it.setSelection(adapter.getPosition(currentModifier))
-            it.isFocusable = false
-
-            it.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    val selected = adapter.getItem(position) ?: "NONE"
-                    if (selected != currentModifier) {
-                        currentModifier = selected
-                        onModifierChanged?.invoke(selected)
-                    }
-                }
-                override fun onNothingSelected(parent: AdapterView<*>?) {}
-            }
+        holder.itemView.setOnLongClickListener {
+            onPreferenceLongClick?.invoke()
+            true
         }
     }
 }
 
-// --- NEW: Preference for Joystick (Strict Spinner ONLY, No binding) ---
-class InlineSpinnerPreference(context: Context, attrs: AttributeSet?) : Preference(context, attrs) {
+// --- Action Key Preference (Includes Dialog Logic for Exclusivity) ---
+class KeyBindingPreference(context: Context, attrs: AttributeSet?) : Preference(context, attrs) {
     init { widgetLayoutResource = R.layout.widget_modifier_spinner }
+    var currentModifier: String = "NONE"
+    var onModifierChanged: ((String) -> Unit)? = null
+    var onPreferenceLongClick: (() -> Unit)? = null
 
     override fun onBindViewHolder(holder: PreferenceViewHolder) {
         super.onBindViewHolder(holder)
-        val spinner = holder.findViewById(R.id.mod_spinner) as? Spinner
-        spinner?.let {
-            val adapter = ArrayAdapter(context, R.layout.spinner_item_small, arrayOf("M1", "M2")) // Strict options
-            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            it.adapter = adapter
-            
-            val currentVal = sharedPreferences?.getString(key, "M1") ?: "M1"
-            it.setSelection(adapter.getPosition(currentVal))
-            it.isFocusable = false
+        holder.itemView.setOnLongClickListener {
+            onPreferenceLongClick?.invoke()
+            true
+        }
 
-            it.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    val selected = adapter.getItem(position) ?: "M1"
-                    if (selected != currentVal) {
-                        sharedPreferences?.edit()?.putString(key, selected)?.apply()
+        val modText = holder.findViewById(R.id.mod_text) as? TextView
+        modText?.text = "▼ $currentModifier" // Arrow perfectly on the left!
+        
+        modText?.setOnClickListener {
+            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            val joyRadial = prefs.getString("joy_radial_mod", "NONE")
+            val joyCursor = prefs.getString("joy_cursor_mod", "NONE")
+            
+            val options = arrayOf("NONE", "M1", "M2", "M3")
+            val displayOptions = options.map { 
+                if (it != "NONE" && (it == joyRadial || it == joyCursor)) "$it (Joystick)" else it 
+            }.toTypedArray()
+
+            android.app.AlertDialog.Builder(context)
+                .setItems(displayOptions) { _, which ->
+                    val selected = options[which]
+                    if (selected != "NONE" && (selected == joyRadial || selected == joyCursor)) {
+                        android.widget.Toast.makeText(context, "Modifier used for joystick. Unset to use here.", android.widget.Toast.LENGTH_LONG).show()
+                    } else if (selected != currentModifier) {
+                        currentModifier = selected
+                        modText.text = "▼ $currentModifier"
+                        onModifierChanged?.invoke(selected)
                     }
-                }
-                override fun onNothingSelected(parent: AdapterView<*>?) {}
-            }
+                }.show()
+        }
+    }
+}
+
+// --- Joystick Preference (Includes Dialog Logic for Exclusivity) ---
+class InlineSpinnerPreference(context: Context, attrs: AttributeSet?) : Preference(context, attrs) {
+    init { widgetLayoutResource = R.layout.widget_modifier_spinner }
+    override fun onBindViewHolder(holder: PreferenceViewHolder) {
+        super.onBindViewHolder(holder)
+        val modText = holder.findViewById(R.id.mod_text) as? TextView
+        
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val currentVal = prefs.getString(key, "NONE") ?: "NONE"
+        modText?.text = "▼ $currentVal"
+
+        modText?.setOnClickListener {
+            val actionModKeys = listOf("mod_accept", "mod_cycle_prev", "mod_backspace_word", "mod_backspace_stroke", "mod_add_space", "mod_clear_text", "mod_enter", "mod_undo", "mod_close", "mod_open_settings", "mod_word_left", "mod_word_right")
+            val usedByActions = actionModKeys.mapNotNull { prefs.getString(it, "NONE") }.filter { it != "NONE" }.toSet()
+            
+            val otherJoyKey = if (key == "joy_radial_mod") "joy_cursor_mod" else "joy_radial_mod"
+            val usedByOtherJoy = prefs.getString(otherJoyKey, "NONE") ?: "NONE"
+
+            val options = arrayOf("NONE", "M1", "M2", "M3")
+            val displayOptions = options.map {
+                if (it != "NONE") {
+                    if (it == usedByOtherJoy) "$it (Other Joystick feature)"
+                    else if (usedByActions.contains(it)) "$it (Action Keys)"
+                    else it
+                } else it
+            }.toTypedArray()
+
+            android.app.AlertDialog.Builder(context)
+                .setItems(displayOptions) { _, which ->
+                    val selected = options[which]
+                    if (selected != "NONE" && (selected == usedByOtherJoy || usedByActions.contains(selected))) {
+                        android.widget.Toast.makeText(context, "Modifier already in use. Unset elsewhere first.", android.widget.Toast.LENGTH_LONG).show()
+                    } else if (selected != currentVal) {
+                        prefs.edit().putString(key, selected).apply()
+                        modText.text = "▼ $selected"
+                    }
+                }.show()
         }
     }
 }
@@ -102,14 +134,24 @@ class SettingsActivity : AppCompatActivity() {
         private lateinit var prefs: SharedPreferences
         private var originalSummary: CharSequence? = null
 
+        val actionKeys = listOf(
+            "key_accept", "key_cycle_fwd", "key_cycle_back", "key_cycle_prev", 
+            "key_backspace_word", "key_backspace_stroke", 
+            "key_add_space", "key_clear_text", "key_enter", 
+            "key_undo", "key_close", "key_open_settings", "key_word_left", "key_word_right"
+        )
+
+        val modKeys = listOf("key_mod_1", "key_mod_2", "key_mod_3")
+        val allKeys = modKeys + actionKeys
+
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.preferences, rootKey)
             prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
 
-            // Added key_mod_1 and key_mod_2 to the listenable list!
+                        // Added key_mod_1 and key_mod_2 to the listenable list!
             val bindableKeys = listOf(
                 "key_mod_1", "key_mod_2", 
-                "key_accept", "key_cycle_prev", "key_backspace_word", "key_backspace_char",
+                "key_accept", "key_cycle_prev", "key_backspace_word",
                 "key_backspace_stroke", "key_add_space", "key_clear_text", "key_enter", 
                 "key_undo", "key_close", "key_open_settings"
             )
@@ -117,10 +159,12 @@ class SettingsActivity : AppCompatActivity() {
             val defaultMappings = mapOf(
                 "key_mod_1" to KeyEvent.KEYCODE_BUTTON_C,
                 "key_mod_2" to KeyEvent.KEYCODE_BUTTON_Z,
+                "key_mod_3" to -1,
+                "key_cycle_fwd" to -1, // Unbound by default
+                "key_cycle_back" to -1, // Unbound by default
                 "key_accept" to KeyEvent.KEYCODE_BUTTON_R1,
                 "key_cycle_prev" to KeyEvent.KEYCODE_BUTTON_X,
                 "key_backspace_word" to KeyEvent.KEYCODE_BUTTON_Y,
-                "key_backspace_char" to -1,
                 "key_backspace_stroke" to KeyEvent.KEYCODE_BUTTON_B,
                 "key_add_space" to KeyEvent.KEYCODE_BUTTON_A,
                 "key_clear_text" to -1,
@@ -130,26 +174,46 @@ class SettingsActivity : AppCompatActivity() {
                 "key_open_settings" to KeyEvent.KEYCODE_BUTTON_START
             )
 
-            for (key in bindableKeys) {
+            for (key in allKeys) {
                 val pref = findPreference<Preference>(key)
-                val currentCode = prefs.getInt(key, defaultMappings[key] ?: -1)
+                val currentCode = prefs.getInt(key, -1)
                 pref?.summary = if (currentCode != -1) "Bound to: ${getKeyName(currentCode)}" else "Unbound"
 
-                // Only attach spinner logic if it's an action key with a spinner
+                val unbindAction = {
+                    prefs.edit().putInt(key, -1).apply()
+                    pref?.summary = "Unbound"
+                    if (listeningKey == key) listeningKey = null 
+                }
+
                 if (pref is KeyBindingPreference) {
                     val modKey = key.replace("key_", "mod_")
                     pref.currentModifier = prefs.getString(modKey, "NONE") ?: "NONE"
-                    pref.onModifierChanged = { newMod ->
-                        prefs.edit().putString(modKey, newMod).apply()
+                    
+                    pref.onModifierChanged = { newMod -> 
+                        val keyCode = prefs.getInt(key, -1)
+                        if (keyCode != -1) {
+                            // If modifier changes, check for new clash with existing combos
+                            for(otherKey in actionKeys) {
+                                if (otherKey != key && prefs.getInt(otherKey, -2) == keyCode) {
+                                    if (prefs.getString(otherKey.replace("key_", "mod_"), "NONE") == newMod) {
+                                        prefs.edit().putInt(otherKey, -1).apply()
+                                        findPreference<Preference>(otherKey)?.summary = "Unbound"
+                                    }
+                                }
+                            }
+                        }
+                        prefs.edit().putString(modKey, newMod).apply() 
                     }
+                    pref.onPreferenceLongClick = unbindAction
+                } else if (pref is LongClickPreference) {
+                    pref.onPreferenceLongClick = unbindAction
                 }
 
-                // All bindable keys (Modifiers AND Actions) get the listening click event
                 pref?.setOnPreferenceClickListener { clickedPref ->
                     if (listeningKey == null) {
                         listeningKey = clickedPref.key
                         originalSummary = clickedPref.summary
-                        clickedPref.summary = "Press any key to bind... (Press Back to cancel)"
+                        clickedPref.summary = "Press key to bind... (Back to cancel, long press to unbind)"
                     }
                     true
                 }
@@ -158,24 +222,51 @@ class SettingsActivity : AppCompatActivity() {
 
         fun bindKey(keyCode: Int) {
             val key = listeningKey ?: return
+            
+            // GLOBAL CLASH PREVENTION LOGIC
+            if (key.startsWith("key_mod_")) {
+                // Core Modifiers cannot share keys with anything. Period.
+                for (otherKey in allKeys) {
+                    if (otherKey != key && prefs.getInt(otherKey, -2) == keyCode) {
+                        prefs.edit().putInt(otherKey, -1).apply()
+                        findPreference<Preference>(otherKey)?.summary = "Unbound"
+                    }
+                }
+            } else {
+                // Action keys can share buttons AS LONG AS the modifier is different
+                val thisMod = prefs.getString(key.replace("key_", "mod_"), "NONE")
+                for (otherKey in allKeys) {
+                    if (otherKey == key) continue
+                    if (prefs.getInt(otherKey, -2) == keyCode) {
+                        if (otherKey.startsWith("key_mod_")) {
+                            // Cannot clash with a core modifier button
+                            prefs.edit().putInt(otherKey, -1).apply()
+                            findPreference<Preference>(otherKey)?.summary = "Unbound"
+                        } else {
+                            // Clash occurs if they share a button AND the same modifier
+                            val otherMod = prefs.getString(otherKey.replace("key_", "mod_"), "NONE")
+                            if (thisMod == otherMod) {
+                                prefs.edit().putInt(otherKey, -1).apply()
+                                findPreference<Preference>(otherKey)?.summary = "Unbound"
+                            }
+                        }
+                    }
+                }
+            }
+
             prefs.edit().putInt(key, keyCode).apply()
-            val pref = findPreference<Preference>(key)
-            pref?.summary = "Bound to: ${getKeyName(keyCode)}"
+            findPreference<Preference>(key)?.summary = "Bound to: ${getKeyName(keyCode)}"
             listeningKey = null
         }
 
         fun cancelListening() {
             val key = listeningKey ?: return
-            val pref = findPreference<Preference>(key)
-            pref?.summary = originalSummary
+            findPreference<Preference>(key)?.summary = originalSummary
             listeningKey = null
         }
 
         private fun getKeyName(keyCode: Int): String {
-            return KeyEvent.keyCodeToString(keyCode)
-                .replace("KEYCODE_", "")
-                .replace("BUTTON_", "")
-                .replace("_", " ")
+            return KeyEvent.keyCodeToString(keyCode).replace("KEYCODE_", "").replace("BUTTON_", "").replace("_", " ")
         }
     }
 }

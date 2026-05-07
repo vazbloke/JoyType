@@ -49,7 +49,7 @@ class SettingsActivity : AppCompatActivity() {
             val bindableKeys = listOf(
                 // "key_cycle_fwd", "key_cycle_back", 
                 "key_accept",
-                "key_cycle_prev", "key_backspace_word", "key_backspace_char",
+                "key_cycle_prev", "key_backspace_word", "key_backspace_char", "key_backspace_stroke",
                 "key_add_space", "key_clear_text", "key_undo", "key_open_settings",
                 "key_enter" // NEW
             )
@@ -61,7 +61,8 @@ class SettingsActivity : AppCompatActivity() {
                 "key_accept" to KeyEvent.KEYCODE_BUTTON_R1,
                 "key_cycle_prev" to KeyEvent.KEYCODE_BUTTON_X,
                 "key_backspace_word" to KeyEvent.KEYCODE_BUTTON_Y,
-                "key_backspace_char" to KeyEvent.KEYCODE_BUTTON_B,
+                // "key_backspace_char" to KeyEvent.KEYCODE_BUTTON_B,
+                "key_backspace_stroke" to KeyEvent.KEYCODE_BUTTON_B, // NEW
                 "key_add_space" to KeyEvent.KEYCODE_BUTTON_A,
                 "key_clear_text" to KeyEvent.KEYCODE_BUTTON_SELECT,
                 "key_undo" to KeyEvent.KEYCODE_BUTTON_THUMBL,

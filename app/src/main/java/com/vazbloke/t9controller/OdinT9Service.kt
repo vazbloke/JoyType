@@ -68,7 +68,7 @@ class OdinT9Service : InputMethodService() {
     enum class Action {
         // CYCLE_FWD, CYCLE_BACK, 
         ACCEPT, CYCLE_PREV,
-        BACKSPACE_WORD, BACKSPACE_CHAR, ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, 
+        BACKSPACE_WORD, BACKSPACE_CHAR, BACKSPACE_STROKE, ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, 
         ENTER // NEW
     }
 
@@ -109,6 +109,7 @@ class OdinT9Service : InputMethodService() {
         keyBindings[prefs.getInt("key_cycle_prev", KeyEvent.KEYCODE_BUTTON_X)] = Action.CYCLE_PREV
         keyBindings[prefs.getInt("key_backspace_word", KeyEvent.KEYCODE_BUTTON_Y)] = Action.BACKSPACE_WORD
         keyBindings[prefs.getInt("key_backspace_char", KeyEvent.KEYCODE_BUTTON_B)] = Action.BACKSPACE_CHAR
+        keyBindings[prefs.getInt("key_backspace_stroke", KeyEvent.KEYCODE_BUTTON_B)] = Action.BACKSPACE_STROKE
         keyBindings[prefs.getInt("key_add_space", KeyEvent.KEYCODE_BUTTON_A)] = Action.ADD_SPACE
         keyBindings[prefs.getInt("key_clear_text", KeyEvent.KEYCODE_BUTTON_SELECT)] = Action.CLEAR_TEXT
         keyBindings[prefs.getInt("key_undo", KeyEvent.KEYCODE_BUTTON_THUMBL)] = Action.UNDO
@@ -428,6 +429,17 @@ class OdinT9Service : InputMethodService() {
                     ic.commitText(" ", 1)
                 }
             }
+            Action.BACKSPACE_STROKE -> {
+                if (wordProbabilities.isNotEmpty()) {
+                    // COMPOSING MODE: Delete the last joystick flick
+                    wordProbabilities.removeAt(wordProbabilities.size - 1)
+                    updateLivePredictions()
+                } else {
+                    // NORMAL MODE: Act like a standard backspace
+                    saveUndoSnapshot()
+                    ic.deleteSurroundingText(1, 0)
+                }
+            }
             Action.NONE -> {}
         }
     }
@@ -518,19 +530,38 @@ class OdinT9Service : InputMethodService() {
     private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
         return sqrt(Math.pow((x2 - p1.x).toDouble(), 2.0) + Math.pow((y2 - p1.y).toDouble(), 2.0)).toFloat()
     }
-
+    
     private fun getCapitalizedWord(word: String): String {
         if (!autoCap) return word
         
+        // 1. Hardcode for the English standalone "I"
+        if (word.lowercase() == "i") return "I"
+        
         val ic = currentInputConnection ?: return word
-        val editorInfo = currentInputEditorInfo ?: return word
+        
+        // 2. Manual Brute-Force Check
+        // Grab the 3 characters right before the cursor to check for punctuation and spaces
+        val textBefore = ic.getTextBeforeCursor(3, 0)?.toString() ?: ""
+        
+        val isStartOfSentence = textBefore.isEmpty() || 
+                                textBefore.endsWith(". ") || 
+                                textBefore.endsWith("! ") || 
+                                textBefore.endsWith("? ") || 
+                                textBefore.endsWith("\n")
 
-        // Ask the Android OS if the cursor is in a position that demands capitalization
-        val capsMode = ic.getCursorCapsMode(editorInfo.inputType)
-        return if (capsMode > 0) {
-            word.replaceFirstChar { it.uppercase() }
-        } else {
-            word
+        if (isStartOfSentence) {
+            return word.replaceFirstChar { it.uppercase() }
         }
+
+        // 3. Fallback to OS checking just in case (for weird text fields)
+        val editorInfo = currentInputEditorInfo
+        if (editorInfo != null) {
+            val capsMode = ic.getCursorCapsMode(editorInfo.inputType)
+            if (capsMode > 0) {
+                return word.replaceFirstChar { it.uppercase() }
+            }
+        }
+        
+        return word
     }
 }

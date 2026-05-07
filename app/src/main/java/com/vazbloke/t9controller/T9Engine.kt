@@ -83,9 +83,12 @@ class T9Engine {
                 current.children[char] = TrieNode()
             }
             current = current.children[char]!!
+            // FIX: Propagate the frequency to prefix nodes so the beam search
+            // knows this path leads to a common word.
+            current.frequency = maxOf(current.frequency, frequency)
         }
         current.isWord = true
-        current.frequency = maxOf(current.frequency, frequency)
+        // current.frequency = maxOf(current.frequency, frequency) -> Can be removed
     }
 
     /**
@@ -93,7 +96,7 @@ class T9Engine {
      * Takes a list of probability maps (one map per joystick inflection).
      * Explores the Trie, dropping highly improbable paths.
      */
-    fun getProbabilisticPredictions(inputProbabilities: List<Map<Char, Float>>, beamWidth: Int = 15): List<String> {
+    fun getProbabilisticPredictions(inputProbabilities: List<Map<Char, Float>>, beamWidth: Int = 50): List<String> { // Increased width
         if (inputProbabilities.isEmpty()) return emptyList()
 
         // State: (CurrentNode, WordSoFar, CumulativeLogProbability)
@@ -108,7 +111,7 @@ class T9Engine {
                     if (prob < 0.02f) continue // Prune absolute noise
 
                     val chars = digitToChars[digit] ?: continue
-                    val transitionLogProb = log(prob.toDouble(), 10.0).toFloat()
+                    val transitionLogProb = kotlin.math.log(prob.toDouble(), 10.0).toFloat()
 
                     // Try every character assigned to that digit
                     for (char in chars) {
@@ -120,17 +123,20 @@ class T9Engine {
                 }
             }
 
-            // Sort by probability and keep only the top paths (The Beam)
-            beam = nextBeam.sortedByDescending { it.third }.take(beamWidth)
+            // FIX: Sort by combined joystick probability AND word frequency heuristic
+            beam = nextBeam.sortedByDescending {
+                it.third + kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat()
+            }.take(beamWidth)
+
             if (beam.isEmpty()) break
         }
 
         // Return the words from valid terminal nodes, sorted by their frequency and probability
         return beam.filter { it.first.isWord }
-            .sortedByDescending { it.third + log(it.first.frequency.toDouble() + 1, 10.0).toFloat() }
+            .sortedByDescending { it.third + kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat() }
             .map { it.second }
     }
-
+    
     // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)
     fun getPredictions(sequence: String): List<String> {
         val deterministicProbs = sequence.map { digit -> mapOf(digit to 1.0f) }

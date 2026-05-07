@@ -24,7 +24,6 @@ import android.view.animation.OvershootInterpolator // For the spring animation!
 
 class OdinT9Service : InputMethodService() {
 
-    private lateinit var tvPredictions: TextView
     private lateinit var swipeDebugView: SwipeDebugView
     private val t9Engine = T9Engine()
     private lateinit var prefs: SharedPreferences
@@ -52,9 +51,6 @@ class OdinT9Service : InputMethodService() {
 
     private var currentPredictions = listOf<String>()
     private var predictionIndex = 0
-
-    private var triggerKey = KeyEvent.KEYCODE_BUTTON_L1
-    private val keyBindings = mutableMapOf<Int, Action>()
     private val undoStack = java.util.Stack<CharSequence>()
 
     // --- New Features State ---
@@ -70,17 +66,31 @@ class OdinT9Service : InputMethodService() {
     private lateinit var vibrator: Vibrator
 
     // --- Cursor UI State ---
-    private var isCursorModifierHeld = false
-    private val cursorKey = KeyEvent.KEYCODE_BUTTON_Z // Your M2 Button
     private var lastCursorMoveTime = 0L
 
+    private lateinit var tvPredictions: TextView
+    private lateinit var hsvPredictions: android.widget.HorizontalScrollView // NEW
+
+    enum class ModifierKey { NONE, M1, M2 }
+    
+    // Replace your old Action enum mapping with a KeyCombo map
+    data class KeyCombo(val keyCode: Int, val modifier: ModifierKey)
+    private val keyBindings = mutableMapOf<KeyCombo, Action>()
 
     enum class Action {
-        // CYCLE_FWD, CYCLE_BACK, 
-        ACCEPT, CYCLE_PREV,
-        BACKSPACE_WORD, BACKSPACE_CHAR, BACKSPACE_STROKE, ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, 
-        ENTER // NEW
+        ACCEPT, CYCLE_PREV, BACKSPACE_WORD, BACKSPACE_CHAR, BACKSPACE_STROKE, 
+        ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, ENTER, 
+        CLOSE_KEYBOARD // NEW
     }
+
+    // Modifier State
+    private var isM1Held = false
+    private var isM2Held = false
+    private var m1KeyCode = KeyEvent.KEYCODE_BUTTON_C
+    private var m2KeyCode = KeyEvent.KEYCODE_BUTTON_Z
+    
+    private var radialModifier = ModifierKey.M1
+    private var cursorModifier = ModifierKey.M2
 
     private val t9Centers = mapOf(
         '1' to PointF(-1f, -1f), '2' to PointF(0f, -1f), '3' to PointF(1f, -1f),
@@ -105,40 +115,65 @@ class OdinT9Service : InputMethodService() {
     private fun loadSettings() {
         autoSpace = prefs.getBoolean("autospace_after_accept", true)
         doubleAcceptPeriod = prefs.getBoolean("double_accept_period", true)
-        autoCap = prefs.getBoolean("auto_capitalization", true) // NEW
-        visualDebug = prefs.getBoolean("visual_debug_mode", true) // NEW
+        autoCap = prefs.getBoolean("auto_capitalization", true)
+        visualDebug = prefs.getBoolean("visual_debug_mode", true)
 
         vibrateOnType = prefs.getBoolean("vibrate_on_type", true)
         vibrateDuration = prefs.getInt("vibrate_duration", 15).toLong()
 
-        // NEW: Hide the debug grid dynamically
         if (::swipeDebugView.isInitialized) {
             swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         }
 
+        // Load Modifiers
+        m1KeyCode = prefs.getInt("key_mod_1", KeyEvent.KEYCODE_BUTTON_C)
+        m2KeyCode = prefs.getInt("key_mod_2", KeyEvent.KEYCODE_BUTTON_Z)
+        
+        radialModifier = if (prefs.getString("joy_radial_mod", "M1") == "M2") ModifierKey.M2 else ModifierKey.M1
+        cursorModifier = if (prefs.getString("joy_cursor_mod", "M2") == "M1") ModifierKey.M1 else ModifierKey.M2
+
         keyBindings.clear()
-        // keyBindings[prefs.getInt("key_cycle_fwd", KeyEvent.KEYCODE_BUTTON_R1)] = Action.CYCLE_FWD
-        // keyBindings[prefs.getInt("key_cycle_back", KeyEvent.KEYCODE_BUTTON_L2)] = Action.CYCLE_BACK
-        keyBindings[prefs.getInt("key_accept", KeyEvent.KEYCODE_BUTTON_R1)] = Action.ACCEPT
-        keyBindings[prefs.getInt("key_cycle_prev", KeyEvent.KEYCODE_BUTTON_X)] = Action.CYCLE_PREV
-        keyBindings[prefs.getInt("key_backspace_word", KeyEvent.KEYCODE_BUTTON_Y)] = Action.BACKSPACE_WORD
-        keyBindings[prefs.getInt("key_backspace_char", KeyEvent.KEYCODE_BUTTON_B)] = Action.BACKSPACE_CHAR
-        keyBindings[prefs.getInt("key_backspace_stroke", KeyEvent.KEYCODE_BUTTON_B)] = Action.BACKSPACE_STROKE
-        keyBindings[prefs.getInt("key_add_space", KeyEvent.KEYCODE_BUTTON_A)] = Action.ADD_SPACE
-        keyBindings[prefs.getInt("key_clear_text", KeyEvent.KEYCODE_BUTTON_SELECT)] = Action.CLEAR_TEXT
-        keyBindings[prefs.getInt("key_undo", KeyEvent.KEYCODE_BUTTON_THUMBL)] = Action.UNDO
-        keyBindings[prefs.getInt("key_open_settings", KeyEvent.KEYCODE_BUTTON_START)] = Action.OPEN_SETTINGS
-        keyBindings[prefs.getInt("key_enter", KeyEvent.KEYCODE_BUTTON_R2)] = Action.ENTER
+
+        // Helper function to pair keys with their dropdown modifiers
+        fun bind(action: Action, keyPref: String, modPref: String, defaultKey: Int) {
+            val keyCode = prefs.getInt(keyPref, defaultKey)
+            val modString = prefs.getString(modPref, "NONE")
+            val mod = when (modString) {
+                "M1" -> ModifierKey.M1
+                "M2" -> ModifierKey.M2
+                else -> ModifierKey.NONE
+            }
+            // Only bind if the key is actually set to something valid
+            if (keyCode != -1) {
+                keyBindings[KeyCombo(keyCode, mod)] = action
+            }
+        }
+
+        // Bind all actions with default values
+        bind(Action.ACCEPT, "key_accept", "mod_accept", KeyEvent.KEYCODE_BUTTON_R1)
+        bind(Action.CYCLE_PREV, "key_cycle_prev", "mod_cycle_prev", KeyEvent.KEYCODE_BUTTON_X)
+        bind(Action.BACKSPACE_WORD, "key_backspace_word", "mod_backspace_word", KeyEvent.KEYCODE_BUTTON_Y)
+        bind(Action.BACKSPACE_CHAR, "key_backspace_char", "mod_backspace_char", -1) 
+        bind(Action.BACKSPACE_STROKE, "key_backspace_stroke", "mod_backspace_stroke", KeyEvent.KEYCODE_BUTTON_B)
+        bind(Action.ADD_SPACE, "key_add_space", "mod_add_space", KeyEvent.KEYCODE_BUTTON_A)
+        bind(Action.CLEAR_TEXT, "key_clear_text", "mod_clear_text", -1)
+        bind(Action.ENTER, "key_enter", "mod_enter", KeyEvent.KEYCODE_BUTTON_R2)
+        bind(Action.UNDO, "key_undo", "mod_undo", KeyEvent.KEYCODE_BUTTON_THUMBL)
+        bind(Action.CLOSE_KEYBOARD, "key_close", "mod_close", KeyEvent.KEYCODE_BUTTON_SELECT)
+        bind(Action.OPEN_SETTINGS, "key_open_settings", "mod_open_settings", KeyEvent.KEYCODE_BUTTON_START)
     }
 
     override fun onCreateInputView(): View {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)
+        hsvPredictions = view.findViewById(R.id.hsv_predictions)
+
         swipeDebugView = view.findViewById(R.id.swipe_debug_view)
         
         // NEW: Respect the visual debug setting on boot
         swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         tvPredictions.text = "..."
+
         return view
     }
 
@@ -209,7 +244,9 @@ class OdinT9Service : InputMethodService() {
             }
 
             // --- CURSOR MODIFIER INTERCEPT ---
-            if (isCursorModifierHeld) {
+            val isCursorActive = (cursorModifier == ModifierKey.M1 && isM1Held) || (cursorModifier == ModifierKey.M2 && isM2Held)
+    
+            if (isCursorActive) {
                 if (mag > 0.2f) { // Slight deadzone
                     val now = System.currentTimeMillis()
                     
@@ -290,55 +327,39 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
         if (event.repeatCount > 0) return true
 
-        // RADIAL UI: OPEN (Words OR Punctuation)
-        if (keyCode == radialKey) {
+        // Track Modifiers
+        if (keyCode == m1KeyCode) isM1Held = true
+        if (keyCode == m2KeyCode) isM2Held = true
+
+        // Radial Menu Intercept
+        val targetRadialKey = if (radialModifier == ModifierKey.M1) m1KeyCode else m2KeyCode
+        if (keyCode == targetRadialKey) {
             isRadialMenuOpen = true
-            isPunctuationMode = currentPredictions.isEmpty() 
-            radialSelectedIndex = 0 
-            radialPage = 0 
-            radialLastOctant = -1 
+            isPunctuationMode = currentPredictions.isEmpty()
+            radialSelectedIndex = 0
+            radialPage = 0
+            radialLastOctant = -1
             
-            // --- THE SLIDE & POP ANIMATION ---
             tvPredictions.animate().cancel() 
             tvPredictions.alpha = 0f
-            tvPredictions.translationY = 30f // Start slightly pushed down
+            tvPredictions.translationY = 30f 
+            tvPredictions.animate().alpha(1f).translationY(0f).setDuration(200).start()
             
-            // Reset scales just in case they were stuck
-            tvPredictions.scaleX = 1f 
-            tvPredictions.scaleY = 1f
-            
-            tvPredictions.animate()
-                .alpha(1f)
-                .translationY(0f) // Spring up into its resting position
-                .setDuration(200) 
-                .setInterpolator(OvershootInterpolator(1.5f)) // A slightly softer spring
-                .start()
-            // ----------------------------
-
             updateUI()
             return true
         }
 
-        if (keyCode == triggerKey) {
-            // ... rest of your code
-            isTriggerHeld = true
-            return true
-        }
-
-        val action = keyBindings[keyCode]
+        // Action Check
+        val currentMod = if (isM1Held) ModifierKey.M1 else if (isM2Held) ModifierKey.M2 else ModifierKey.NONE
+        val action = keyBindings[KeyCombo(keyCode, currentMod)]
+        
         if (action != null) {
             executeAction(action)
             return true
         }
 
-        if (keyCode == cursorKey) {
-            isCursorModifierHeld = true
-            return true
-        }
-
-        // D-PAD TEXT CURSOR PASSTHROUGH
-        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
-            keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+        // DPAD PASSTHROUGH
+        if (keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)) {
             currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
             return true
         }
@@ -347,30 +368,39 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        
+        // Track Modifier Releases
+        if (keyCode == m1KeyCode) isM1Held = false
+        if (keyCode == m2KeyCode) isM2Held = false
 
         // RADIAL UI: COMMIT
-        if (keyCode == radialKey) {
+        val targetRadialKey = if (radialModifier == ModifierKey.M1) m1KeyCode else m2KeyCode
+        if (keyCode == targetRadialKey) {
             if (isRadialMenuOpen) {
                 isRadialMenuOpen = false
 
                 // Cleanup the animation state
                 tvPredictions.animate().cancel()
-                tvPredictions.translationY = 0f // NEW: Reset the vertical slide
+                tvPredictions.translationY = 0f
+
+                val ic = currentInputConnection
 
                 if (isPunctuationMode) {
                     val items = if (radialPage == 0) punctuationsP1 else punctuationsP2
                     saveUndoSnapshot()
-                    currentInputConnection?.commitText(items[radialSelectedIndex], 1)
-                } else if (currentPredictions.isNotEmpty() && radialSelectedIndex < currentPredictions.size) {
+                    ic?.commitText(items[radialSelectedIndex], 1)
+                } else if (currentPredictions.isNotEmpty()) {
                     saveUndoSnapshot()
-                    val ic = currentInputConnection
                     
-                    // THE FIX: Check capitalization for Radial Menu words!
-                    val wordToCommit = getCapitalizedWord(currentPredictions[radialSelectedIndex])
-                    ic?.commitText(wordToCommit, 1)
+                    // CALCULATE EXACT INDEX based on the current page!
+                    val actualIndex = (radialPage * 8) + radialSelectedIndex
                     
-                    if (autoSpace) ic?.commitText(" ", 1)
-                    lastAcceptTime = System.currentTimeMillis()
+                    if (actualIndex < currentPredictions.size) {
+                        val wordToCommit = getCapitalizedWord(currentPredictions[actualIndex])
+                        ic?.commitText(wordToCommit, 1)
+                        if (autoSpace) ic?.commitText(" ", 1)
+                        lastAcceptTime = System.currentTimeMillis()
+                    }
                     resetState() 
                 }
                 updateUI()
@@ -378,28 +408,7 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             return true
         }
 
-        if (keyCode == triggerKey) {
-            // ... rest of your code
-            isTriggerHeld = false
-
-            // Finalize the active swipe stroke upon releasing the trigger
-            if (currentStrokePath.isNotEmpty()) {
-//                val inflections = swipeEngine.extractInflectionPoints(currentStrokePath)
-//                for (point in inflections) {
-//                    if (abs(point.x) < 0.1f && abs(point.y) < 0.1f) continue
-//                    wordProbabilities.add(generateProbabilityMap(point)) // Reverted to Digits
-//                }
-                currentStrokePath.clear()
-                updateLivePredictions()
-            }
-            return true
-        }
-
-        if (keyCode == cursorKey) {
-            isCursorModifierHeld = false
-            return true
-        }
-
+        // D-PAD TEXT CURSOR PASSTHROUGH
         if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
             keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
             currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
@@ -413,18 +422,6 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         val ic = currentInputConnection ?: return
 
         when (action) {
-            // Action.CYCLE_FWD -> {
-            //     if (currentPredictions.isNotEmpty()) {
-            //         predictionIndex = (predictionIndex + 1) % currentPredictions.size
-            //         updateUI()
-            //     }
-            // }
-            // Action.CYCLE_BACK -> {
-            //     if (currentPredictions.isNotEmpty()) {
-            //         predictionIndex = (predictionIndex - 1 + currentPredictions.size) % currentPredictions.size
-            //         updateUI()
-            //     }
-            // }
             Action.ACCEPT -> {
                 saveUndoSnapshot()
 
@@ -561,6 +558,10 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                     ic.deleteSurroundingText(1, 0)
                 }
             }
+            Action.CLOSE_KEYBOARD -> {
+                triggerHapticClick()
+                requestHideSelf(0)
+            }
             Action.NONE -> {}
         }
     }
@@ -589,7 +590,6 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         radialPage = 0
         radialLastOctant = -1
         vibratedThisStroke = false
-        isCursorModifierHeld = false
     }
 
     private fun updateUI() {
@@ -598,7 +598,7 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             return
         }
         
-        // 1. Slice the lists for drawing
+        // 1. Slice lists: Standard mode now ALSO caps at 8 words (Bug 1 Fix)
         val itemsToDraw = if (isRadialMenuOpen) {
             if (isPunctuationMode) {
                 if (radialPage == 0) punctuationsP1 else punctuationsP2
@@ -607,7 +607,9 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                 val end = kotlin.math.min(start + 8, currentPredictions.size)
                 if (start < currentPredictions.size) currentPredictions.subList(start, end) else emptyList()
             }
-        } else currentPredictions
+        } else {
+            currentPredictions.take(8) // Standard typing is capped at 8!
+        }
 
         // 2. Format the text
         var display = if (isRadialMenuOpen) {
@@ -624,15 +626,41 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             }.joinToString("   ")
         }
 
-        // 3. Add dynamic pagination text
+        // 3. Shortened Pagination: [1/3]
         if (isRadialMenuOpen) {
             val maxPages = if (isPunctuationMode) 2 else kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
             if (maxPages > 1) {
-                display += "   <font color='#888888'><i>[Pg ${radialPage + 1}/$maxPages]</i></font>"
+                display += "   <font color='#888888'><i>[${radialPage + 1}/$maxPages]</i></font>"
             }
         }
         
         tvPredictions.text = Html.fromHtml(display, Html.FROM_HTML_MODE_LEGACY)
+
+        // 4. THE AUTO-SCROLL MAGIC
+        if (isRadialMenuOpen && itemsToDraw.isNotEmpty()) {
+            tvPredictions.post {
+                val layout = tvPredictions.layout
+                if (layout != null) {
+                    val plainText = tvPredictions.text.toString()
+                    val targetWord = itemsToDraw[radialSelectedIndex]
+                    // Find where this word starts in the plain text string
+                    val charIndex = plainText.indexOf("[$") // Matches the arrow and word
+                    val fallbackIndex = plainText.indexOf(targetWord)
+                    
+                    val actualIndex = if (charIndex >= 0) charIndex else fallbackIndex
+                    
+                    if (actualIndex >= 0) {
+                        // Ask Android for the exact pixel X coordinate of that letter!
+                        val xOffset = layout.getPrimaryHorizontal(actualIndex).toInt()
+                        // Scroll to it, minus half the screen width to center it perfectly
+                        hsvPredictions.smoothScrollTo(xOffset - (hsvPredictions.width / 2), 0)
+                    }
+                }
+            }
+        } else {
+            // Reset scroll when not in radial mode
+            hsvPredictions.scrollTo(0, 0)
+        }
     }
 
     private fun generateProbabilityMap(pt: PointF): Map<Char, Float> {
@@ -641,7 +669,7 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         var sum = 0f
         for ((digit, center) in t9Centers) {
             val dist = getDistance(center, pt.x, pt.y)
-            val p = kotlin.math.exp(-(dist * dist) / (2 * sigma * sigma).toDouble()).toFloat()
+            val p = Math.exp(-(dist * dist) / (2 * sigma * sigma).toDouble()).toFloat()
             probs[digit] = p
             sum += p
         }

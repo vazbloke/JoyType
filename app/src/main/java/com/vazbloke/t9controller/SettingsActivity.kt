@@ -51,7 +51,8 @@ class SettingsActivity : AppCompatActivity() {
                 "key_accept",
                 "key_cycle_prev", "key_backspace_word", "key_backspace_char", "key_backspace_stroke",
                 "key_add_space", "key_clear_text", "key_undo", "key_open_settings",
-                "key_enter" // NEW
+                "key_enter", // NEW
+                "key_mod_1", "key_mod_2", "key_close"
             )
 
             // Default fallback mappings if never set

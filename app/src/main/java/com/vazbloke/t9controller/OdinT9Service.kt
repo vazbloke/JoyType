@@ -39,8 +39,14 @@ class OdinT9Service : InputMethodService() {
     private var isRadialMenuOpen = false
     private var isPunctuationMode = false
     private var radialSelectedIndex = 0
-    private val PUNCTUATIONS = listOf(".", ",", "?", "!", "-", "'", "@", ":")
+    // private val PUNCTUATIONS = listOf(".", ",", "?", "!", "-", "'", "@", ":")
     private val RADIAL_KEY = KeyEvent.KEYCODE_BUTTON_C // Your M1 Button
+
+    // NEW: Pagination State
+    private var radialPage = 0 
+    private var radialLastOctant = -1
+    private val PUNCTUATIONS_P1 = listOf(".", ",", "?", "!", "-", "'", "@", ":")
+    private val PUNCTUATIONS_P2 = listOf("\"", "(", ")", "/", "\\", "_", ";", "&") // Add whatever you want here!
 
 
     private var joyAngleSum = 0f
@@ -134,11 +140,26 @@ class OdinT9Service : InputMethodService() {
 
                     val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
                     
-                    // NEW: Use Punctuation mode or Word mode
-                    val maxIndex = if (isPunctuationMode) PUNCTUATIONS.size - 1 else currentPredictions.size - 1
+                    // NEW: iPod Click-Wheel Pagination
+                    if (isPunctuationMode && radialLastOctant != -1) {
+                        // Clockwise crossover (Top-Left to Top) -> Next Page
+                        if (radialLastOctant == 7 && octant == 0) {
+                            radialPage = 1 
+                        }
+                        // Counter-Clockwise crossover (Top to Top-Left) -> Prev Page
+                        else if (radialLastOctant == 0 && octant == 7) {
+                            radialPage = 0
+                        }
+                    }
+                    radialLastOctant = octant // Save for the next frame
                     
-                    if (maxIndex >= 0) {
-                        radialSelectedIndex = octant.coerceAtMost(maxIndex)
+                    // Pick the correct list to read from
+                    val currentItems = if (isPunctuationMode) {
+                        if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
+                    } else currentPredictions
+                    
+                    if (currentItems.isNotEmpty()) {
+                        radialSelectedIndex = octant.coerceAtMost(currentItems.size - 1)
                         updateUI()
                     }
                 }
@@ -191,8 +212,10 @@ class OdinT9Service : InputMethodService() {
         // RADIAL UI: OPEN (Words OR Punctuation)
         if (keyCode == RADIAL_KEY) {
             isRadialMenuOpen = true
-            isPunctuationMode = currentPredictions.isEmpty() // Empty = Punctuation Mode!
+            isPunctuationMode = currentPredictions.isEmpty() 
             radialSelectedIndex = 0 
+            radialPage = 0 // NEW: Always start on Page 1
+            radialLastOctant = -1 // NEW: Reset the boundary tracker
             updateUI()
             return true
         }
@@ -220,15 +243,15 @@ class OdinT9Service : InputMethodService() {
                 isRadialMenuOpen = false
                 
                 if (isPunctuationMode) {
-                    // Commit Punctuation
+                    // NEW: Pull from the correct page
+                    val items = if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
                     saveUndoSnapshot()
-                    currentInputConnection?.commitText(PUNCTUATIONS[radialSelectedIndex], 1)
+                    currentInputConnection?.commitText(items[radialSelectedIndex], 1)
                 } else if (currentPredictions.isNotEmpty() && radialSelectedIndex < currentPredictions.size) {
-                    // Commit Word
                     saveUndoSnapshot()
                     val space = if (autoSpace) " " else ""
                     currentInputConnection?.commitText("${currentPredictions[radialSelectedIndex]}$space", 1)
-                    lastAcceptTime = System.currentTimeMillis() // Track for double-accept!
+                    lastAcceptTime = System.currentTimeMillis()
                     resetState() 
                 }
                 updateUI()
@@ -369,6 +392,8 @@ class OdinT9Service : InputMethodService() {
         tvPredictions.text = "JoyJoy Ready"
         isRadialMenuOpen = false
         isPunctuationMode = false
+        radialPage = 0
+        radialLastOctant = -1
     }
 
     private fun updateUI() {
@@ -379,7 +404,11 @@ class OdinT9Service : InputMethodService() {
         
         val display = if (isRadialMenuOpen) {
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
-            val items = if (isPunctuationMode) PUNCTUATIONS else currentPredictions
+            
+            // NEW: Fetch the correct list for drawing
+            val items = if (isPunctuationMode) {
+                if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
+            } else currentPredictions
             
             items.mapIndexed { index, word ->
                 val dir = if (index < arrows.size) arrows[index] else ""

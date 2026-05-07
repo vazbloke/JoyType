@@ -24,26 +24,26 @@ class OdinT9Service : InputMethodService() {
     private val swipeEngine = SwipeEngine()
     private lateinit var prefs: SharedPreferences
 
-    // --- JoyJoy State ---
-    private var isTrackingWord = false
-    private val joySwipePath = mutableListOf<PointF>()
+    // --- Hybrid State ---
+    private var isTriggerHeld = false
+    private val currentStrokePath = mutableListOf<PointF>()
+    private val wordProbabilities = mutableListOf<Map<Char, Float>>()
+
     private var joyAngleSum = 0f
-    private var joyLastAngle = 0f
-    private val joyProbabilities = mutableListOf<Map<Char, Float>>()
+    private var joyLastAngle = -999f
+    private var circleDetectedThisStroke = false
 
     private var currentPredictions = listOf<String>()
     private var predictionIndex = 0
 
-    // --- Configurations ---
-    private var completionMode = "press_after" // Options: "hold_to_swipe", "press_after"
+    private var autoSpace = true
+    private var triggerKey = KeyEvent.KEYCODE_BUTTON_L1
     private val keyBindings = mutableMapOf<Int, Action>()
-
-    // --- State History (For Undo) ---
     private val undoStack = java.util.Stack<CharSequence>()
 
     enum class Action {
         CYCLE_FWD, CYCLE_BACK, ACCEPT, CYCLE_PREV,
-        BACKSPACE_WORD, BACKSPACE_CHAR, ADD_SPACE, CLEAR_TEXT, UNDO, NONE
+        BACKSPACE_WORD, BACKSPACE_CHAR, ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE
     }
 
     private val t9Centers = mapOf(
@@ -60,22 +60,26 @@ class OdinT9Service : InputMethodService() {
         loadSettings()
     }
 
-    private fun loadSettings() {
-        // In your SettingsActivity, save this as "hold_to_swipe" or "press_after"
-        completionMode = prefs.getString("word_completion_mode", "press_after") ?: "press_after"
+    override fun onWindowShown() {
+        super.onWindowShown()
+        loadSettings()
+    }
 
-        // Map your desired default Gamepad KeyCodes to Actions here.
-        // These can be updated via SharedPreferences in your settings.
+    private fun loadSettings() {
+        autoSpace = prefs.getBoolean("autospace_after_accept", true)
+        triggerKey = prefs.getInt("key_trigger", KeyEvent.KEYCODE_BUTTON_L1)
+
         keyBindings.clear()
         keyBindings[prefs.getInt("key_cycle_fwd", KeyEvent.KEYCODE_BUTTON_R1)] = Action.CYCLE_FWD
-        keyBindings[prefs.getInt("key_cycle_back", KeyEvent.KEYCODE_BUTTON_L1)] = Action.CYCLE_BACK // Assuming L1 is NOT the trigger
+        keyBindings[prefs.getInt("key_cycle_back", KeyEvent.KEYCODE_BUTTON_L2)] = Action.CYCLE_BACK
         keyBindings[prefs.getInt("key_accept", KeyEvent.KEYCODE_BUTTON_R2)] = Action.ACCEPT
         keyBindings[prefs.getInt("key_cycle_prev", KeyEvent.KEYCODE_BUTTON_X)] = Action.CYCLE_PREV
         keyBindings[prefs.getInt("key_backspace_word", KeyEvent.KEYCODE_BUTTON_Y)] = Action.BACKSPACE_WORD
         keyBindings[prefs.getInt("key_backspace_char", KeyEvent.KEYCODE_BUTTON_B)] = Action.BACKSPACE_CHAR
         keyBindings[prefs.getInt("key_add_space", KeyEvent.KEYCODE_BUTTON_A)] = Action.ADD_SPACE
         keyBindings[prefs.getInt("key_clear_text", KeyEvent.KEYCODE_BUTTON_SELECT)] = Action.CLEAR_TEXT
-        keyBindings[prefs.getInt("key_undo", KeyEvent.KEYCODE_BUTTON_START)] = Action.UNDO
+        keyBindings[prefs.getInt("key_undo", KeyEvent.KEYCODE_BUTTON_THUMBL)] = Action.UNDO
+        keyBindings[prefs.getInt("key_open_settings", KeyEvent.KEYCODE_BUTTON_START)] = Action.OPEN_SETTINGS
     }
 
     override fun onCreateInputView(): View {
@@ -87,26 +91,26 @@ class OdinT9Service : InputMethodService() {
         return view
     }
 
-    // --- JOYSTICK INPUT HANDLING ---
-
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         if (!isInputViewShown) return super.onGenericMotionEvent(event)
 
         if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK ||
             event.source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD) {
 
-            val x = event.getAxisValue(MotionEvent.AXIS_X)
-            val y = event.getAxisValue(MotionEvent.AXIS_Y)
-            val mag = sqrt((x * x + y * y).toDouble()).toFloat()
+            val rawX = event.getAxisValue(MotionEvent.AXIS_X)
+            val rawY = event.getAxisValue(MotionEvent.AXIS_Y)
+            val magL = sqrt((rawX * rawX + rawY * rawY).toDouble()).toFloat()
 
-            // Mode 2: "Press After". We auto-start tracking if the stick leaves center.
-            if (completionMode == "press_after" && mag > 0.2f && !isTrackingWord) {
-                startTracking()
-            }
+            val rawZ = event.getAxisValue(MotionEvent.AXIS_Z)
+            val rawRZ = event.getAxisValue(MotionEvent.AXIS_RZ)
+            val magR = sqrt((rawZ * rawZ + rawRZ * rawRZ).toDouble()).toFloat()
 
-            if (isTrackingWord) {
-                handleJoyJoyMovement(x, y, mag)
-            }
+            val useRightStick = magR > magL
+            val x = if (useRightStick) rawZ else rawX
+            val y = if (useRightStick) rawRZ else rawY
+            val mag = if (useRightStick) magR else magL
+
+            handleJoyJoyMovement(x, y, mag)
             return true
         }
         return super.onGenericMotionEvent(event)
@@ -115,86 +119,95 @@ class OdinT9Service : InputMethodService() {
     private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         val mapped = mapCircleToSquare(rawX, rawY)
 
-        // Ignore movements near the physical deadzone so thumb can rest/cross center safely
-        if (mag < 0.2f) {
+        // 1. HARDWARE SNAPBACK TO CENTER (MAGNITUDE 0.0)
+        if (mag == 0.0f) {
+            if (currentStrokePath.isNotEmpty()) {
+                if (isTriggerHeld) {
+                    // Continuous Swipe: Trace the center crossing visually
+                    currentStrokePath.add(PointF(0f, 0f))
+                } else {
+                    // Discrete Mode: Finalize the single character flick
+                    if (!circleDetectedThisStroke) {
+                        val maxPt = currentStrokePath.maxByOrNull { sqrt(it.x * it.x + it.y * it.y) }
+                        if (maxPt != null && sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
+                            wordProbabilities.add(generateProbabilityMap(maxPt))
+                        }
+                    }
+                    currentStrokePath.clear()
+                    circleDetectedThisStroke = false
+                    updateLivePredictions()
+                }
+            }
             joyAngleSum = 0f
+            joyLastAngle = -999f
             return
         }
 
-        // '5' Key Circle Detection (Thumb swiping in a tight circle near center)
-        if (mag < 0.6f) {
-            val currentAngle = atan2(rawY.toDouble(), rawX.toDouble()).toFloat()
-            var delta = currentAngle - joyLastAngle
+        // 2. ACTIVE MOVEMENT
+        currentStrokePath.add(PointF(mapped.x, mapped.y))
 
-            while (delta > Math.PI) delta -= (2 * Math.PI).toFloat()
-            while (delta < -Math.PI) delta += (2 * Math.PI).toFloat()
+        // 3. '5' CIRCLE DETECTION
+        val currentAngle = atan2(rawY.toDouble(), rawX.toDouble()).toFloat()
+        if (joyLastAngle == -999f) joyLastAngle = currentAngle
 
-            joyAngleSum += delta
-            joyLastAngle = currentAngle
+        var delta = currentAngle - joyLastAngle
+        while (delta > Math.PI) delta -= (2 * Math.PI).toFloat()
+        while (delta < -Math.PI) delta += (2 * Math.PI).toFloat()
 
-            if (abs(joyAngleSum) > Math.PI) {
-                joyAngleSum = 0f
-                val fiveMap = t9Centers.keys.associateWith { if (it == '5') 0.95f else 0.005f }
-                joyProbabilities.add(fiveMap)
-                joySwipePath.add(PointF(0f, 0f))
-                updateLivePredictions()
-            }
+        // Accumulate smooth rotation. A straight line cross resets it.
+        if (abs(delta) < (Math.PI / 2)) joyAngleSum += delta else joyAngleSum = 0f
+        joyLastAngle = currentAngle
+
+        if (abs(joyAngleSum) > Math.PI && !circleDetectedThisStroke) {
+            circleDetectedThisStroke = true
+            val fiveMap = t9Centers.keys.associateWith { if (it == '5') 0.95f else 0.005f }
+            wordProbabilities.add(fiveMap)
+            joyAngleSum = 0f // Reset to allow multiple 5s if they keep spinning
+
+            // Note: We deliberately do NOT clear currentStrokePath here so the visual line continues unbroken.
+            updateLivePredictions()
+        }
+
+        // Only live-update while swiping to show the inflections, discrete updates on snapback
+        if (isTriggerHeld) {
+            updateLivePredictions()
         } else {
-            val last = joySwipePath.lastOrNull()
-            if (last == null || getDistance(last, mapped.x, mapped.y) > 0.05f) {
-                joySwipePath.add(PointF(mapped.x, mapped.y))
-                updateLivePredictions()
-            }
+            // But still draw the raw line for discrete mode
+            swipeDebugView.updateJoyT9Debug(currentStrokePath, emptyList(), wordProbabilities)
         }
     }
 
     private fun updateLivePredictions() {
-        if (joySwipePath.isEmpty() && joyProbabilities.isEmpty()) return
+        val tempProbabilities = wordProbabilities.toMutableList()
 
-        val inflections = swipeEngine.extractInflectionPoints(joySwipePath)
-        val tempProbabilities = joyProbabilities.toMutableList()
-
-        for (point in inflections) {
-            if (abs(point.x) < 0.1f && abs(point.y) < 0.1f) continue
-            tempProbabilities.add(generateProbabilityMap(point))
+        var activeInflections = listOf<PointF>()
+        // If swiping, dynamically extract and preview the corners being built
+        if (isTriggerHeld && currentStrokePath.isNotEmpty()) {
+            activeInflections = swipeEngine.extractInflectionPoints(currentStrokePath)
+            for (point in activeInflections) {
+                if (abs(point.x) < 0.1f && abs(point.y) < 0.1f) continue
+                tempProbabilities.add(generateProbabilityMap(point))
+            }
         }
 
-        swipeDebugView.updateJoyT9Debug(joySwipePath, inflections, tempProbabilities)
+        swipeDebugView.updateJoyT9Debug(currentStrokePath, activeInflections, tempProbabilities)
 
-        currentPredictions = t9Engine.getProbabilisticPredictions(tempProbabilities)
-        predictionIndex = 0
-        updateUI()
+        if (tempProbabilities.isNotEmpty()) {
+            currentPredictions = t9Engine.getProbabilisticPredictions(tempProbabilities)
+            predictionIndex = 0
+            updateUI()
+        }
     }
-
-    private fun startTracking() {
-        isTrackingWord = true
-        joySwipePath.clear()
-        joyProbabilities.clear()
-        joyAngleSum = 0f
-        currentPredictions = emptyList()
-        predictionIndex = 0
-        swipeDebugView.clear()
-        tvPredictions.text = "Tracking..."
-    }
-
-    // --- BUTTON CONTROLS & ROUTING ---
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
         if (event.repeatCount > 0) return true
 
-        // 1. Check for Word Boundary Trigger (Hardcoded to L1 for this example)
-        if (keyCode == KeyEvent.KEYCODE_BUTTON_L1) {
-            if (completionMode == "hold_to_swipe") {
-                startTracking()
-            } else if (completionMode == "press_after") {
-                executeAction(Action.ACCEPT)
-                isTrackingWord = false
-            }
+        if (keyCode == triggerKey) {
+            isTriggerHeld = true
             return true
         }
 
-        // 2. Check Custom Key Bindings
         val action = keyBindings[keyCode]
         if (action != null) {
             executeAction(action)
@@ -205,10 +218,19 @@ class OdinT9Service : InputMethodService() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        // If mode is "Hold to Swipe", releasing L1 finalizes the word
-        if (keyCode == KeyEvent.KEYCODE_BUTTON_L1 && completionMode == "hold_to_swipe") {
-            isTrackingWord = false
-            executeAction(Action.ACCEPT)
+        if (keyCode == triggerKey) {
+            isTriggerHeld = false
+
+            // Finalize the active swipe stroke upon releasing the trigger
+            if (currentStrokePath.isNotEmpty()) {
+                val inflections = swipeEngine.extractInflectionPoints(currentStrokePath)
+                for (point in inflections) {
+                    if (abs(point.x) < 0.1f && abs(point.y) < 0.1f) continue
+                    wordProbabilities.add(generateProbabilityMap(point))
+                }
+                currentStrokePath.clear()
+                updateLivePredictions()
+            }
             return true
         }
         return super.onKeyUp(keyCode, event)
@@ -233,18 +255,18 @@ class OdinT9Service : InputMethodService() {
             Action.ACCEPT -> {
                 saveUndoSnapshot()
                 if (currentPredictions.isNotEmpty()) {
-                    ic.commitText("${currentPredictions[predictionIndex]}", 1)
+                    val space = if (autoSpace) " " else ""
+                    ic.commitText("${currentPredictions[predictionIndex]}$space", 1)
                 }
                 resetState()
             }
             Action.CYCLE_PREV -> {
-                // Reads text before cursor, finds last word, cycles its prediction, and replaces it
                 saveUndoSnapshot()
                 val textBefore = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
                 val lastWordMatch = Regex("([a-zA-Z]+)\\s*$").find(textBefore)
                 if (lastWordMatch != null) {
                     val lastWord = lastWordMatch.groupValues[1]
-                    val seq = t9Engine.wordToSequence(lastWord) // Note: Requires making wordToSequence public in T9Engine
+                    val seq = t9Engine.wordToSequence(lastWord)
                     val preds = t9Engine.getPredictions(seq)
                     if (preds.isNotEmpty()) {
                         val currentIdx = preds.indexOf(lastWord)
@@ -263,9 +285,7 @@ class OdinT9Service : InputMethodService() {
                 val deleteLen = wordMatch?.value?.length ?: spacesLen
                 if (deleteLen > 0) ic.deleteSurroundingText(deleteLen, 0)
             }
-            Action.BACKSPACE_CHAR -> {
-                ic.deleteSurroundingText(1, 0)
-            }
+            Action.BACKSPACE_CHAR -> ic.deleteSurroundingText(1, 0)
             Action.ADD_SPACE -> {
                 saveUndoSnapshot()
                 ic.commitText(" ", 1)
@@ -282,6 +302,11 @@ class OdinT9Service : InputMethodService() {
                     ic.commitText(previousState, 1)
                 }
             }
+            Action.OPEN_SETTINGS -> {
+                val intent = android.content.Intent(this, SettingsActivity::class.java)
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+            }
             Action.NONE -> {}
         }
     }
@@ -291,14 +316,15 @@ class OdinT9Service : InputMethodService() {
         val currentText = ic.getExtractedText(ExtractedTextRequest(), 0)?.text
         if (currentText != null) {
             undoStack.push(currentText)
-            // Prevent memory leak on long sessions
             if (undoStack.size > 20) undoStack.removeAt(0)
         }
     }
 
     private fun resetState() {
-        joySwipePath.clear()
-        joyProbabilities.clear()
+        isTriggerHeld = false
+        currentStrokePath.clear()
+        wordProbabilities.clear()
+        circleDetectedThisStroke = false
         currentPredictions = emptyList()
         predictionIndex = 0
         swipeDebugView.clear()
@@ -310,21 +336,16 @@ class OdinT9Service : InputMethodService() {
             tvPredictions.text = "Tracking..."
             return
         }
-
         val display = currentPredictions.mapIndexed { index, word ->
             if (index == predictionIndex) "<b><font color='#A3FF00'>[$word]</font></b>" else word
         }.joinToString("   ")
-
         tvPredictions.text = Html.fromHtml(display, Html.FROM_HTML_MODE_LEGACY)
     }
-
-    // --- UTILITIES ---
 
     private fun generateProbabilityMap(pt: PointF): Map<Char, Float> {
         val sigma = 0.55f
         val probs = mutableMapOf<Char, Float>()
         var sum = 0f
-
         for ((digit, center) in t9Centers) {
             val dist = getDistance(center, pt.x, pt.y)
             val p = Math.exp(-(dist * dist) / (2 * sigma * sigma).toDouble()).toFloat()

@@ -98,6 +98,10 @@ class OdinT9Service : InputMethodService() {
         '7' to PointF(-1f, 1f),  '8' to PointF(0f, 1f),  '9' to PointF(1f, 1f)
     )
 
+    // Clickwheel
+    private var isPeggedAtStart = false
+    private var isPeggedAtEnd = false
+
     override fun onCreate() {
         super.onCreate()
         vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
@@ -204,23 +208,41 @@ class OdinT9Service : InputMethodService() {
                     if (angle < 0) angle += 2 * Math.PI
 
                     val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
-                    
-                    // 1. Calculate how many pages we actually have
                     val maxPages = if (isPunctuationMode) 2 else kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
-                    
-                    // 2. Pagination Logic (iPod click-wheel style)
+
                     if (radialLastOctant != -1) {
+                        // Clockwise crossover (7 to 0)
                         if (radialLastOctant == 7 && octant == 0) {
-                            // Roll forward, cap at the last page
-                            radialPage = kotlin.math.min(radialPage + 1, maxPages - 1)
-                        } else if (radialLastOctant == 0 && octant == 7) {
-                            // Roll backward, cap at the first page
-                            radialPage = kotlin.math.max(radialPage - 1, 0)
+                            if (isPeggedAtStart) {
+                                isPeggedAtStart = false // THE FIX: Just unpeg, don't turn the page!
+                            } else if (radialPage < maxPages - 1) {
+                                radialPage++
+                            } else if (!isPeggedAtEnd) {
+                                isPeggedAtEnd = true
+                                triggerHardHapticClick() // THUNK!
+                            }
+                        }
+                        // Counter-Clockwise crossover (0 to 7)
+                        else if (radialLastOctant == 0 && octant == 7) {
+                            if (isPeggedAtEnd) {
+                                isPeggedAtEnd = false // THE FIX: Just unpeg, don't turn the page!
+                            } else if (radialPage > 0) {
+                                radialPage--
+                            } else if (!isPeggedAtStart) {
+                                isPeggedAtStart = true
+                                triggerHardHapticClick() // THUNK!
+                            }
                         }
                     }
+
                     radialLastOctant = octant
-                    
-                    // 3. Slice the correct list based on the current page
+
+                    // Un-peg if the user pulls the stick down away from the top boundary
+                    if (octant in 2..6) {
+                        isPeggedAtStart = false
+                        isPeggedAtEnd = false
+                    }
+
                     val currentItems = if (isPunctuationMode) {
                         if (radialPage == 0) punctuationsP1 else punctuationsP2
                     } else {
@@ -228,17 +250,31 @@ class OdinT9Service : InputMethodService() {
                         val end = kotlin.math.min(start + 8, currentPredictions.size)
                         if (start < currentPredictions.size) currentPredictions.subList(start, end) else emptyList()
                     }
-                    
+
                     if (currentItems.isNotEmpty()) {
-                        val newIndex = octant.coerceAtMost(currentItems.size - 1)
-                        
-                        // NEW: TRAVERSAL VIBRATION
+                        // Lock the visual selection if pegged against a wall
+                        val newIndex = if (isPeggedAtStart) {
+                            0
+                        } else if (isPeggedAtEnd) {
+                            currentItems.size - 1
+                        } else {
+                            octant.coerceAtMost(currentItems.size - 1)
+                        }
+
                         if (newIndex != radialSelectedIndex) {
                             radialSelectedIndex = newIndex
-                            triggerHapticClick() // Premium tick as you roll the stick!
+                            // Only tick if they aren't pushing against a wall
+                            if (!isPeggedAtStart && !isPeggedAtEnd) {
+                                triggerHapticClick()
+                            }
                         }
                         updateUI()
                     }
+                } else {
+                    // Stick released -> Reset scroll states completely
+                    radialLastOctant = -1
+                    isPeggedAtStart = false
+                    isPeggedAtEnd = false
                 }
                 return true
             }
@@ -409,10 +445,9 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         }
 
         // D-PAD TEXT CURSOR PASSTHROUGH
-        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
-            keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-            return true
+        if (keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)) {
+            // Returning false refuses the input, forcing Android to natively pass it to the text box!
+            return false 
         }
 
         return super.onKeyUp(keyCode, event)
@@ -590,6 +625,8 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         radialPage = 0
         radialLastOctant = -1
         vibratedThisStroke = false
+        isPeggedAtStart = false
+        isPeggedAtEnd = false
     }
 
     private fun updateUI() {
@@ -598,7 +635,7 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             return
         }
         
-        // 1. Slice lists: Standard mode now ALSO caps at 8 words (Bug 1 Fix)
+        // 1. Slice lists: Standard mode now ALSO caps at 8 words
         val itemsToDraw = if (isRadialMenuOpen) {
             if (isPunctuationMode) {
                 if (radialPage == 0) punctuationsP1 else punctuationsP2
@@ -608,7 +645,7 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                 if (start < currentPredictions.size) currentPredictions.subList(start, end) else emptyList()
             }
         } else {
-            currentPredictions.take(8) // Standard typing is capped at 8!
+            currentPredictions.take(8)
         }
 
         // 2. Format the text
@@ -634,31 +671,38 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             }
         }
         
-        tvPredictions.text = Html.fromHtml(display, Html.FROM_HTML_MODE_LEGACY)
+        tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
 
-        // 4. THE AUTO-SCROLL MAGIC
-        if (isRadialMenuOpen && itemsToDraw.isNotEmpty()) {
+        // 4. THE CRASH FIX: Capture state and use Try/Catch Failsafes
+        val capturedSelectedIndex = radialSelectedIndex
+        val capturedItems = itemsToDraw.toList()
+
+        if (isRadialMenuOpen && capturedItems.isNotEmpty()) {
             tvPredictions.post {
                 val layout = tvPredictions.layout
-                if (layout != null) {
+                if (layout != null && capturedSelectedIndex < capturedItems.size) {
                     val plainText = tvPredictions.text.toString()
-                    val targetWord = itemsToDraw[radialSelectedIndex]
-                    // Find where this word starts in the plain text string
-                    val charIndex = plainText.indexOf("[$") // Matches the arrow and word
-                    val fallbackIndex = plainText.indexOf(targetWord)
+                    val targetWord = capturedItems[capturedSelectedIndex]
                     
+                    val charIndex = plainText.indexOf("[$") 
+                    val fallbackIndex = plainText.indexOf(targetWord)
                     val actualIndex = if (charIndex >= 0) charIndex else fallbackIndex
                     
-                    if (actualIndex >= 0) {
-                        // Ask Android for the exact pixel X coordinate of that letter!
-                        val xOffset = layout.getPrimaryHorizontal(actualIndex).toInt()
-                        // Scroll to it, minus half the screen width to center it perfectly
-                        hsvPredictions.smoothScrollTo(xOffset - (hsvPredictions.width / 2), 0)
+                    // Explicitly check that the index is within the bounds of the CURRENT layout state
+                    if (actualIndex >= 0 && actualIndex <= layout.text.length) {
+                        try {
+                            val xOffset = layout.getPrimaryHorizontal(actualIndex).toInt()
+                            // Add tvPredictions.left so the scroll offset knows where the text actually starts inside the LinearLayout!
+                            hsvPredictions.smoothScrollTo(tvPredictions.left + xOffset - (hsvPredictions.width / 2), 0)
+                        } catch (e: Exception) {
+                            // If Android's async layout engine desyncs during a hyper-fast spin,
+                            // silently catch it. It will self-correct on the very next frame!
+                            e.printStackTrace()
+                        }
                     }
                 }
             }
         } else {
-            // Reset scroll when not in radial mode
             hsvPredictions.scrollTo(0, 0)
         }
     }
@@ -737,6 +781,16 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         } else {
             @Suppress("DEPRECATION")
             vibrator.vibrate(vibrateDuration)
+        }
+    }
+
+    private fun triggerHardHapticClick() {
+        if (!vibrateOnType || !vibrator.hasVibrator()) return
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            vibrator.vibrate(android.os.VibrationEffect.createOneShot(vibrateDuration + 25L, 255))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(vibrateDuration + 25L)
         }
     }
 }

@@ -131,7 +131,6 @@ class T9Engine {
                     val transitionLogProb = kotlin.math.log(prob.toDouble(), 10.0).toFloat()
 
                     // Try every character assigned to that digit
-                    // Try every character assigned to that digit
                     for (char in chars) {
                         // 1. STANDARD PATH: The node has the character directly
                         if (node.children.containsKey(char)) {

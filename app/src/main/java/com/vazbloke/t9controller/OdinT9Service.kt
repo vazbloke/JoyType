@@ -24,17 +24,19 @@ class OdinT9Service : InputMethodService() {
     private val swipeEngine = SwipeEngine()
     private lateinit var prefs: SharedPreferences
 
-    private val currentStrokePath = mutableListOf<PointF>()
-
-    // --- Hybrid State ---
-    private var isTriggerHeld = false
-    private var isJklModifierHeld = false // NEW: Tracks the M1/M2 button
-
     // Most controllers map the extra C/Z buttons to these:
     private val MODIFIER_KEY_1 = KeyEvent.KEYCODE_BUTTON_C
     private val MODIFIER_KEY_2 = KeyEvent.KEYCODE_BUTTON_Z
 
+    // --- Hybrid State ---
+    private var isTriggerHeld = false
+    private val currentStrokePath = mutableListOf<PointF>()
     private val wordProbabilities = mutableListOf<Map<Char, Float>>()
+
+    // --- RADIAL UI STATE ---
+    private var isRadialMenuOpen = false
+    private var radialSelectedIndex = 0
+    private val RADIAL_KEY = KeyEvent.KEYCODE_BUTTON_C // Change this to your M1 keycode
 
     private var joyAngleSum = 0f
     private var joyLastAngle = -999f
@@ -107,17 +109,38 @@ class OdinT9Service : InputMethodService() {
 
             val rawX = event.getAxisValue(MotionEvent.AXIS_X)
             val rawY = event.getAxisValue(MotionEvent.AXIS_Y)
-            val magL = sqrt((rawX * rawX + rawY * rawY).toDouble()).toFloat()
+            val magL = kotlin.math.sqrt((rawX * rawX + rawY * rawY).toDouble()).toFloat()
 
             val rawZ = event.getAxisValue(MotionEvent.AXIS_Z)
             val rawRZ = event.getAxisValue(MotionEvent.AXIS_RZ)
-            val magR = sqrt((rawZ * rawZ + rawRZ * rawRZ).toDouble()).toFloat()
+            val magR = kotlin.math.sqrt((rawZ * rawZ + rawRZ * rawRZ).toDouble()).toFloat()
 
             val useRightStick = magR > magL
             val x = if (useRightStick) rawZ else rawX
             val y = if (useRightStick) rawRZ else rawY
             val mag = if (useRightStick) magR else magL
 
+            // --- RADIAL UI JOYSTICK INTERCEPT ---
+            if (isRadialMenuOpen) {
+                if (mag > 0.3f) { // Deadzone so a resting thumb doesn't jump the selection
+                    // 1. Calculate angle, shift Top to 0, range [0, 2PI)
+                    var angle = kotlin.math.atan2(y.toDouble(), x.toDouble())
+                    angle += Math.PI / 2.0
+                    if (angle < 0) angle += 2 * Math.PI
+
+                    // 2. Divide into 8 octants (0 = Top, 1 = TopRight, 2 = Right...)
+                    val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
+
+                    // 3. Prevent crashing if there are less than 8 words available
+                    if (currentPredictions.isNotEmpty()) {
+                        radialSelectedIndex = octant.coerceAtMost(currentPredictions.size - 1)
+                        updateUI()
+                    }
+                }
+                return true // Stop standard T9 math from running!
+            }
+
+            // --- NORMAL T9 TYPING ---
             handleJoyJoyMovement(x, y, mag)
             return true
         }
@@ -209,14 +232,18 @@ class OdinT9Service : InputMethodService() {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
         if (event.repeatCount > 0) return true
 
-        // INTERCEPT MODIFIER PRESS
-        if (keyCode == MODIFIER_KEY_1 || keyCode == MODIFIER_KEY_2) {
-            isJklModifierHeld = true
+        // RADIAL UI: OPEN
+        if (keyCode == RADIAL_KEY) {
+            if (currentPredictions.isNotEmpty()) {
+                isRadialMenuOpen = true
+                radialSelectedIndex = 0 // Default to the first word
+                updateUI()
+            }
             return true
         }
 
         if (keyCode == triggerKey) {
-// ... rest of your code
+            // ... rest of your code
             isTriggerHeld = true
             return true
         }
@@ -231,14 +258,27 @@ class OdinT9Service : InputMethodService() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        // INTERCEPT MODIFIER RELEASE
-        if (keyCode == MODIFIER_KEY_1 || keyCode == MODIFIER_KEY_2) {
-            isJklModifierHeld = false
+
+        // RADIAL UI: COMMIT WORD AND CLOSE
+        if (keyCode == RADIAL_KEY) {
+            if (isRadialMenuOpen) {
+                isRadialMenuOpen = false
+
+                // User let go of M1, commit the highlighted word!
+                if (currentPredictions.isNotEmpty() && radialSelectedIndex < currentPredictions.size) {
+                    saveUndoSnapshot()
+                    val space = if (autoSpace) " " else ""
+                    currentInputConnection?.commitText("${currentPredictions[radialSelectedIndex]}$space", 1)
+                    resetState()
+                } else {
+                    updateUI()
+                }
+            }
             return true
         }
 
         if (keyCode == triggerKey) {
-// ... rest of your code
+            // ... rest of your code
             isTriggerHeld = false
 
             // Finalize the active swipe stroke upon releasing the trigger
@@ -350,6 +390,7 @@ class OdinT9Service : InputMethodService() {
         predictionIndex = 0
         swipeDebugView.clear()
         tvPredictions.text = "JoyJoy Ready"
+        isRadialMenuOpen = false
     }
 
     private fun updateUI() {
@@ -357,25 +398,28 @@ class OdinT9Service : InputMethodService() {
             tvPredictions.text = "Tracking..."
             return
         }
-        val display = currentPredictions.mapIndexed { index, word ->
-            if (index == predictionIndex) "<b><font color='#A3FF00'>[$word]</font></b>" else word
-        }.joinToString("   ")
+
+        val display = if (isRadialMenuOpen) {
+            // RADIAL UI MODE: Add arrows and dim unselected words
+            val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
+            currentPredictions.mapIndexed { index, word ->
+                val dir = if (index < arrows.size) arrows[index] else ""
+
+                if (index == radialSelectedIndex) "<b><font color='#FFA500'>[$dir $word]</font></b>"
+                else "<font color='#555555'>$dir $word</font>"
+            }.joinToString("   ")
+
+        } else {
+            // STANDARD MODE
+            currentPredictions.mapIndexed { index, word ->
+                if (index == predictionIndex) "<b><font color='#A3FF00'>[$word]</font></b>" else word
+            }.joinToString("   ")
+        }
+
         tvPredictions.text = Html.fromHtml(display, Html.FROM_HTML_MODE_LEGACY)
     }
 
     private fun generateProbabilityMap(pt: PointF): Map<Char, Float> {
-        // --- NEW: HARDWARE OVERRIDE ---
-        if (isJklModifierHeld) {
-            // If M1/M2 is held, ignore the joystick angle completely.
-            // Return 100% probability for '5' and 0% for everything else.
-            val overrideProbs = mutableMapOf<Char, Float>()
-            for (digit in t9Centers.keys) {
-                overrideProbs[digit] = if (digit == '5') 1.0f else 0.0f
-            }
-            return overrideProbs
-        }
-
-        // --- NORMAL JOYSTICK MATH ---
         val sigma = 0.55f
         val probs = mutableMapOf<Char, Float>()
         var sum = 0f

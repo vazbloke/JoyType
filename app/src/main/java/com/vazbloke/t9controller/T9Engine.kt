@@ -15,11 +15,11 @@ class TrieNode(
 
 class T9Engine {
     private val charToDigit = mapOf(
-        '\'' to '1', // NEW: Map apostrophe to the '1' direction
+        '\'' to '1', 'j' to '1', 'k' to '1', 'l' to '1', // NEW: Option A mapping
         'a' to '2', 'b' to '2', 'c' to '2',
         'd' to '3', 'e' to '3', 'f' to '3',
         'g' to '4', 'h' to '4', 'i' to '4',
-        'j' to '5', 'k' to '5', 'l' to '5',
+        // '5' is now empty
         'm' to '6', 'n' to '6', 'o' to '6',
         'p' to '7', 'q' to '7', 'r' to '7', 's' to '7',
         't' to '8', 'u' to '8', 'v' to '8',
@@ -27,11 +27,11 @@ class T9Engine {
     )
 
     private val digitToChars = mapOf(
-        '1' to listOf('\''), // NEW: '1' now outputs an apostrophe
+        '1' to listOf('\'', 'j', 'k', 'l'), // NEW
         '2' to listOf('a', 'b', 'c'),
         '3' to listOf('d', 'e', 'f'),
         '4' to listOf('g', 'h', 'i'),
-        '5' to listOf('j', 'k', 'l'),
+        // No '5' mapping required
         '6' to listOf('m', 'n', 'o'),
         '7' to listOf('p', 'q', 'r', 's'),
         '8' to listOf('t', 'u', 'v'),
@@ -164,8 +164,10 @@ class T9Engine {
 
         return beam.filter { it.first.isWord }
             .sortedByDescending { it.third + (freqWeight * kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat()) }
+            // ... inside getProbabilisticPredictions:
+            // Make sure you update the end of the return statement from .take(6) to .take(8)
             .map { it.second }
-            .take(6) // Clutter control
+            .take(8) // We need 8 to fill the radial UI!
     }
 
     // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)

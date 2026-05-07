@@ -243,18 +243,22 @@ class OdinT9Service : InputMethodService() {
         if (keyCode == RADIAL_KEY) {
             if (isRadialMenuOpen) {
                 isRadialMenuOpen = false
-                
+
+                val ic = currentInputConnection
+
                 if (isPunctuationMode) {
-                    // NEW: Pull from the correct page
                     val items = if (radialPage == 0) PUNCTUATIONS_P1 else PUNCTUATIONS_P2
                     saveUndoSnapshot()
-                    currentInputConnection?.commitText(items[radialSelectedIndex], 1)
+                    ic?.commitText(items[radialSelectedIndex], 1)
                 } else if (currentPredictions.isNotEmpty() && radialSelectedIndex < currentPredictions.size) {
                     saveUndoSnapshot()
-                    val space = if (autoSpace) " " else ""
-                    currentInputConnection?.commitText("${currentPredictions[radialSelectedIndex]}$space", 1)
+
+                    // THE FIX: Split commit for the Radial menu!
+                    ic?.commitText(currentPredictions[radialSelectedIndex], 1)
+                    if (autoSpace) ic?.commitText(" ", 1)
+
                     lastAcceptTime = System.currentTimeMillis()
-                    resetState() 
+                    resetState()
                 }
                 updateUI()
             }
@@ -299,11 +303,13 @@ class OdinT9Service : InputMethodService() {
             Action.ACCEPT -> {
                 saveUndoSnapshot()
                 val now = System.currentTimeMillis()
-                
+                val ic = currentInputConnection ?: return // Safety check
+
                 if (currentPredictions.isNotEmpty()) {
-                    // Normal Word Accept
-                    val space = if (autoSpace) " " else ""
-                    ic.commitText("${currentPredictions[predictionIndex]}$space", 1)
+                    // THE FIX: Split the commit to bypass Android auto-cap eating spaces
+                    ic.commitText(currentPredictions[predictionIndex], 1)
+                    if (autoSpace) ic.commitText(" ", 1)
+                    
                     lastAcceptTime = now
                 } else {
                     // Empty Accept - Check for Double Tap!
@@ -390,6 +396,21 @@ class OdinT9Service : InputMethodService() {
                 
                 // Optional: If you want the keyboard to forcefully hide itself after pressing Enter
                 // requestHideSelf(0) 
+            }
+            Action.ADD_SPACE -> {
+                saveUndoSnapshot()
+                val ic = currentInputConnection ?: return
+                
+                if (currentPredictions.isNotEmpty()) {
+                    // If a word is queued up, accept it AND add a space
+                    ic.commitText(currentPredictions[predictionIndex], 1)
+                    ic.commitText(" ", 1)
+                    lastAcceptTime = System.currentTimeMillis()
+                    resetState()
+                } else {
+                    // Otherwise, just add a space
+                    ic.commitText(" ", 1)
+                }
             }
             Action.NONE -> {}
         }

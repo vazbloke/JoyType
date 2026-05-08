@@ -907,7 +907,14 @@ class OdinT9Service : InputMethodService() {
 
     private fun updateUI() {
         if (currentPredictions.isEmpty() && !isRadialMenuOpen) {
-            tvPredictions.text = "..."
+            if (wordProbabilities.isNotEmpty()) {
+                // UX Polish: The user is mid-stroke, but the engine currently has no exact matches to show.
+                // Display a green indicator so they know the keyboard is still tracking their inputs!
+                tvPredictions.text = android.text.Html.fromHtml("<b><font color='#A3FF00'>[...]</font></b>", android.text.Html.FROM_HTML_MODE_LEGACY)
+            } else {
+                // Resting state
+                tvPredictions.text = "..."
+            }
             return
         }
         

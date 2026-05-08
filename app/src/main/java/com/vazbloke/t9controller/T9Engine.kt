@@ -161,12 +161,61 @@ class T9Engine {
             if (beam.isEmpty()) break
         }
 
-        return beam.filter { it.first.isWord }
+        // --- REFINED: Deep-Path Lookahead (Prefix Completion) ---
+        val exactMatches = beam.filter { it.first.isWord }.toMutableList()
+
+        // THE FIX: ONLY trigger lookahead if there are absolutely ZERO exact matches!
+        if (exactMatches.isEmpty()) {
+            val completions = mutableListOf<Triple<TrieNode, String, Float>>()
+            
+            // Only branch off the top 5 most probable paths to save performance
+            val topPaths = beam.sortedByDescending { 
+                it.third + (freqWeight * kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat()) 
+            }.take(5)
+
+            for ((node, wordSoFar, logProb) in topPaths) {
+                collectDescendants(node, wordSoFar, logProb - 0.2f, completions, 10)
+            }
+            
+            // THE THROTTLE: Sort the completions, remove duplicates, and take ONLY 4!
+            val topCompletions = completions
+                .sortedByDescending { it.third + (freqWeight * kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat()) }
+                .distinctBy { it.second }
+                .take(4) 
+                
+            exactMatches.addAll(topCompletions)
+        }
+
+        return exactMatches
             .sortedByDescending { it.third + (freqWeight * kotlin.math.log(it.first.frequency.toDouble() + 1, 10.0).toFloat()) }
-            // ... inside getProbabilisticPredictions:
-            // Make sure you update the end of the return statement from .take(6) to .take(8)
+            .distinctBy { it.second } // Ensure no duplicate strings appear in the UI
             .map { it.second }
-            .take(24) // NEW: 3 pages of 8 words
+            .take(24) // Still allows up to 24 for normal exact-match typing
+    }
+
+    /**
+     * Helper function to greedily fetch auto-completions.
+     */
+    private fun collectDescendants(
+        node: TrieNode,
+        prefix: String,
+        baseLogProb: Float,
+        results: MutableList<Triple<TrieNode, String, Float>>,
+        depthLeft: Int
+    ) {
+        // OPTIMIZATION: We only need 4 final results, so we can stop collecting at 10 
+        // to keep the engine lightning fast!
+        if (depthLeft <= 0 || results.size >= 10) return 
+
+        val sortedChildren = node.children.entries.sortedByDescending { it.value.frequency }
+        
+        for ((char, child) in sortedChildren) {
+            val newWord = prefix + char
+            if (child.isWord) {
+                results.add(Triple(child, newWord, baseLogProb))
+            }
+            collectDescendants(child, newWord, baseLogProb, results, depthLeft - 1)
+        }
     }
 
     // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)

@@ -1,10 +1,8 @@
-package com.vazbloke.t9controller
+package com.vazbloke.joytype
 
-import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.PointF
 import android.inputmethodservice.InputMethodService
-import android.text.Html
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -17,14 +15,9 @@ import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.sqrt
 
-import android.os.Vibrator
-import android.os.VibrationEffect
-import android.os.Build
-import android.view.animation.OvershootInterpolator // For the spring animation!
+class JoyTypeService : InputMethodService() {
 
-class OdinT9Service : InputMethodService() {
-
-    private lateinit var swipeDebugView: SwipeDebugView
+    private lateinit var visualDebugView: VisualDebugView
     private val t9Engine = T9Engine()
     private lateinit var prefs: SharedPreferences
 
@@ -37,17 +30,16 @@ class OdinT9Service : InputMethodService() {
     
     // --- Radial UI State ---
     private var isRadialMenuOpen = false
-    private var isPunctuationMode = false
+    private var isSpecialCharMode = false
     private var radialSelectedIndex = 0
-    // private val PUNCTUATIONS = listOf(".", ",", "?", "!", "-", "'", "@", ":")
     private val radialKey = KeyEvent.KEYCODE_BUTTON_C // Your M1 Button
 
     // NEW: Pagination State
     private var radialPage = 0 
     private var radialLastOctant = -1
     
-    // Master Punctuation List (32 Symbols = 4 Pages)
-    private val PUNCTUATIONS = listOf(
+    // Master Special character List (32 Symbols = 4 Pages)
+    private val SPECIAL_CHARS = listOf(
         ".", ",", "?", "!", "@", "-", "_", ":", 
         ";", "'", "\"", "(", ")", "/", "\\", "&", 
         "#", "%", "*", "+", "=", "<", ">", "$", 
@@ -80,14 +72,16 @@ class OdinT9Service : InputMethodService() {
     private var glideTextLength = 0
 
     private lateinit var tvPredictions: TextView
+    private lateinit var tvModeBadge: TextView
+    private lateinit var tvPaginationBadge: TextView
     private lateinit var hsvPredictions: android.widget.HorizontalScrollView
 
     // --- Live Reload Receiver ---
     private val dictReloadReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
             if (intent?.action == "com.vazbloke.t9controller.RELOAD_DICT") {
-                t9Engine.fullReload(this@OdinT9Service)
-                android.widget.Toast.makeText(this@OdinT9Service, "Custom Dictionary Reloaded", android.widget.Toast.LENGTH_SHORT).show()
+                t9Engine.fullReload(this@JoyTypeService)
+                android.widget.Toast.makeText(this@JoyTypeService, "Custom Dictionary Reloaded", android.widget.Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -99,7 +93,7 @@ class OdinT9Service : InputMethodService() {
     private val keyBindings = mutableMapOf<KeyCombo, Action>()
 
     enum class Action {
-        ACCEPT, CYCLE_PREV, BACKSPACE_WORD, BACKSPACE_STROKE, 
+        ACCEPT, RECOMPOSE, BACKSPACE_WORD, BACKSPACE_STROKE, 
         ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, ENTER, 
         CLOSE_KEYBOARD, CURSOR_WORD_LEFT, CURSOR_WORD_RIGHT,
         CYCLE_FWD, CYCLE_BACK, TOGGLE_MODE, ADD_TO_DICT
@@ -234,8 +228,8 @@ class OdinT9Service : InputMethodService() {
 
         pairInputMode = prefs.getBoolean("pair_input_mode", false)
 
-        if (::swipeDebugView.isInitialized) {
-            swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
+        if (::visualDebugView.isInitialized) {
+            visualDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         }
 
         // Load Modifiers using SSOT
@@ -279,7 +273,7 @@ class OdinT9Service : InputMethodService() {
 
         // Bind all actions with default values
         bind(Action.ACCEPT, "key_accept", "mod_accept")
-        bind(Action.CYCLE_PREV, "key_cycle_prev", "mod_cycle_prev")
+        bind(Action.RECOMPOSE, "key_recompose", "mod_cycle_prev")
         bind(Action.BACKSPACE_WORD, "key_backspace_word", "mod_backspace_word")
         bind(Action.BACKSPACE_STROKE, "key_backspace_stroke", "mod_backspace_stroke")
         bind(Action.ADD_SPACE, "key_add_space", "mod_add_space")
@@ -299,12 +293,15 @@ class OdinT9Service : InputMethodService() {
     override fun onCreateInputView(): View {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)
-        swipeDebugView = view.findViewById(R.id.swipe_debug_view)
+        tvModeBadge = view.findViewById(R.id.tv_mode_badge)
+        tvPaginationBadge = view.findViewById(R.id.tv_pagination_badge)
+
+        visualDebugView = view.findViewById(R.id.swipe_debug_view)
         
         // THE FIX: Hook up the scroll view so it doesn't crash!
         hsvPredictions = view.findViewById(R.id.hsv_predictions) 
         
-        swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
+        visualDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         setRestingUI()
 
         // Toast instruction
@@ -344,8 +341,8 @@ class OdinT9Service : InputMethodService() {
                     if (angle < 0) angle += 2 * Math.PI
 
                     val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
-                    val maxPages = if (isPunctuationMode) {
-                        kotlin.math.ceil(PUNCTUATIONS.size / 8.0).toInt()
+                    val maxPages = if (isSpecialCharMode) {
+                        kotlin.math.ceil(SPECIAL_CHARS.size / 8.0).toInt()
                     } else {
                         kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
                     }
@@ -383,10 +380,10 @@ class OdinT9Service : InputMethodService() {
                         isPeggedAtEnd = false
                     }
 
-                    val currentItems = if (isPunctuationMode) {
+                    val currentItems = if (isSpecialCharMode) {
                         val start = radialPage * 8
-                        val end = kotlin.math.min(start + 8, PUNCTUATIONS.size)
-                        if (start < PUNCTUATIONS.size) PUNCTUATIONS.subList(start, end) else emptyList()
+                        val end = kotlin.math.min(start + 8, SPECIAL_CHARS.size)
+                        if (start < SPECIAL_CHARS.size) SPECIAL_CHARS.subList(start, end) else emptyList()
                     } else {
                         val start = radialPage * 8
                         val end = kotlin.math.min(start + 8, currentPredictions.size)
@@ -519,7 +516,7 @@ class OdinT9Service : InputMethodService() {
                 lastMag = mag
                 
                 // Update debug view immediately to show the glowing point mid-flick
-                swipeDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
+                visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
                 return
             }
         }
@@ -569,13 +566,13 @@ class OdinT9Service : InputMethodService() {
                 }
                 currentStrokePath.clear()
                 updateUI()
-                swipeDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
+                visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
             }
             return
         }
 
         currentStrokePath.add(PointF(mapped.x, mapped.y))
-        swipeDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
+        visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
     }
 
     private fun updateLivePredictions() {
@@ -592,17 +589,17 @@ class OdinT9Service : InputMethodService() {
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
 
-        // NEW: Check if it's a D-pad key
         val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
         
-        // Eat held buttons (to prevent machine-gunning inputs), EXCEPT for the D-pad!
-        if (event.repeatCount > 0 && !isDPad) return true
-
         // D-PAD TEXT CURSOR PASSTHROUGH
         if (isDPad) {
-            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            // THE FIX: Punch the key event directly through to the underlying app
+            sendDownUpKeyEvents(keyCode)
             return true
         }
+
+        // Eat held buttons (to prevent machine-gunning inputs), EXCEPT for the D-pad!
+        if (event.repeatCount > 0 && !isDPad) return true
 
         // Track Modifiers
         if (keyCode == m1KeyCode) isM1Held = true
@@ -620,7 +617,7 @@ class OdinT9Service : InputMethodService() {
         // Ensure it doesn't trigger if targetRadialKey is -1 (NONE selected)
         if (targetRadialKey != -1 && keyCode == targetRadialKey) {
             isRadialMenuOpen = true
-            isPunctuationMode = currentPredictions.isEmpty()
+            isSpecialCharMode = currentPredictions.isEmpty()
             radialSelectedIndex = 0
             radialPage = 0
             radialLastOctant = -1
@@ -668,7 +665,8 @@ class OdinT9Service : InputMethodService() {
         // D-PAD TEXT CURSOR PASSTHROUGH
         val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
         if (isDPad) {
-            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            // Because sendDownUpKeyEvents() fires BOTH the down and up action instantly,
+            // we simply swallow the physical hardware 'up' event so we don't double-fire!
             return true
         }
 
@@ -689,23 +687,28 @@ class OdinT9Service : InputMethodService() {
 
                 val ic = currentInputConnection
                 
-                if (isPunctuationMode) {
+                if (isSpecialCharMode) {
                     val actualIndex = (radialPage * 8) + radialSelectedIndex
-                    if (actualIndex < PUNCTUATIONS.size) {
+                    if (actualIndex < SPECIAL_CHARS.size) {
                         saveUndoSnapshot()
-                        ic?.commitText(PUNCTUATIONS[actualIndex], 1)
+                        ic?.commitText(SPECIAL_CHARS[actualIndex], 1)
                     }
                 } else if (currentPredictions.isNotEmpty()) {
                     saveUndoSnapshot()
-                    
-                    // CALCULATE EXACT INDEX based on the current page!
                     val actualIndex = (radialPage * 8) + radialSelectedIndex
                     
                     if (actualIndex < currentPredictions.size) {
-                        val wordToCommit = getCapitalizedWord(currentPredictions[actualIndex])
-                        ic?.commitText(wordToCommit, 1)
-                        if (autoSpace) ic?.commitText(" ", 1)
-                        lastAcceptTime = System.currentTimeMillis()
+                        if (currentMode == InputMode.T9) {
+                            // --- T9 MODE ---
+                            val wordToCommit = getCapitalizedWord(currentPredictions[actualIndex])
+                            ic?.commitText(wordToCommit, 1)
+                            if (autoSpace) ic?.commitText(" ", 1)
+                            lastAcceptTime = System.currentTimeMillis()
+                        } else {
+                            // --- MANUAL MODE ---
+                            // Absolute raw control. No capitalization, no spaces.
+                            ic?.commitText(currentPredictions[actualIndex], 1)
+                        }
                     }
                     resetState() 
                 }
@@ -743,7 +746,14 @@ class OdinT9Service : InputMethodService() {
                         // --- T9 MODE ---
                         val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
                         ic.commitText(wordToCommit, 1)
-                        if (autoSpace) ic.commitText(" ", 1)
+
+                        // Smart Auto-Space checks if a space or special character is already there!
+                        if (autoSpace) {
+                            val textAfter = ic.getTextAfterCursor(1, 0)?.toString() ?: ""
+                            if (!textAfter.startsWith(" ") && !textAfter.startsWith(".") && !textAfter.startsWith(",")) {
+                                ic.commitText(" ", 1)
+                            }
+                        }
                         lastAcceptTime = now // Allow double-tap period next
                     } else {
                         // --- MANUAL MODE ---
@@ -793,7 +803,7 @@ class OdinT9Service : InputMethodService() {
                     }
                 }
             }
-            Action.CYCLE_PREV -> {
+            Action.RECOMPOSE -> {
                 // If the user is currently typing a word, ignore this action so we don't overwrite their current thread
                 if (wordProbabilities.isNotEmpty()) return 
 
@@ -804,18 +814,21 @@ class OdinT9Service : InputMethodService() {
                 val text = extracted.text.toString()
                 val cursor = extracted.selectionStart
 
-                // 1. Skip any trailing spaces immediately before the cursor
+                // Helper lambda: Words consist of letters OR apostrophes
+                val isWordChar = { c: Char -> c.isLetter() || c == '\'' }
+
+                // 1. THE FIX: Skip trailing spaces AND special characters immediately before the cursor
                 var searchCursor = cursor
-                while (searchCursor > 0 && text[searchCursor - 1].isWhitespace()) {
+                while (searchCursor > 0 && !isWordChar(text[searchCursor - 1])) {
                     searchCursor--
                 }
 
                 // 2. Expand outwards from the true end of the word to find the start
                 var start = searchCursor
-                while (start > 0 && text[start - 1].isLetter()) start--
+                while (start > 0 && isWordChar(text[start - 1])) start--
                 
                 var end = searchCursor
-                while (end < text.length && text[end].isLetter()) end++
+                while (end < text.length && isWordChar(text[end])) end++
 
                 if (start < end) {
                     val targetWord = text.substring(start, end)
@@ -854,6 +867,15 @@ class OdinT9Service : InputMethodService() {
                     
                     // Generate the predictions
                     currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
+
+                    // If the engine couldn't find the word (e.g., it was a weird password typed in ABC mode), 
+                    // force it to the very front of the prediction list so the UI doesn't collapse!
+                    if (currentPredictions.isEmpty() || currentPredictions.none { it.equals(targetWord, ignoreCase = true) }) {
+                        val newPredictions = currentPredictions.toMutableList()
+                        newPredictions.add(0, targetWord)
+                        currentPredictions = newPredictions
+                    }
+
                     // Try to pre-select the exact word they just pulled back
                     val foundIndex = currentPredictions.indexOfFirst { it.equals(targetWord, ignoreCase = true) }
                     predictionIndex = if (foundIndex != -1) foundIndex else 0
@@ -865,18 +887,20 @@ class OdinT9Service : InputMethodService() {
             }
             Action.ADD_SPACE -> {
                 saveUndoSnapshot()
-
                 fireActionHaptic()
 
                 if (currentPredictions.isNotEmpty()) {
-                    // If a word is queued up, accept it AND add a space
-                    val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
-                    ic.commitText(wordToCommit, 1)
-                    if (autoSpace) ic.commitText(" ", 1)
-                    lastAcceptTime = System.currentTimeMillis()
+                    if (currentMode == InputMode.T9) {
+                        val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+                        ic.commitText(wordToCommit, 1)
+                        if (autoSpace) ic.commitText(" ", 1)
+                        lastAcceptTime = System.currentTimeMillis()
+                    } else {
+                        // In Manual mode, just commit the raw char (and NO auto-space!)
+                        ic.commitText(currentPredictions[predictionIndex], 1)
+                    }
                     resetState()
                 } else {
-                    // Otherwise, just add a space
                     ic.commitText(" ", 1)
                 }
             }
@@ -1013,17 +1037,22 @@ class OdinT9Service : InputMethodService() {
     }
 
     private fun resetState() {
+        // THE FIX: Cache the active stroke probabilities BEFORE clearing them!
+        if (wordProbabilities.isNotEmpty()) {
+            lastAcceptedProbabilities.clear()
+            lastAcceptedProbabilities.addAll(wordProbabilities)
+        }
+
         isTriggerHeld = false
         currentStrokePath.clear()
         wordProbabilities.clear()
-        // ... rest of resetState
         circleDetectedThisStroke = false
         currentPredictions = emptyList()
         predictionIndex = 0
-        swipeDebugView.clear()
+        visualDebugView.clear()
         setRestingUI()  
         isRadialMenuOpen = false
-        isPunctuationMode = false
+        isSpecialCharMode = false
         radialPage = 0
         radialLastOctant = -1
         vibratedThisStroke = false
@@ -1046,13 +1075,17 @@ class OdinT9Service : InputMethodService() {
             setRestingUI(isComposingEmpty = wordProbabilities.isNotEmpty())
             return
         }
+
+        // If the code makes it past the 'return' above, it means the user 
+        // IS actively typing or has the radial menu open. Hide the badge
+        tvModeBadge.visibility = View.GONE
         
         // 1. Slice lists: Standard mode now ALSO caps at 8 words
         val itemsToDraw = if (isRadialMenuOpen) {
-            if (isPunctuationMode) {
+            if (isSpecialCharMode) {
                 val start = radialPage * 8
-                val end = kotlin.math.min(start + 8, PUNCTUATIONS.size)
-                if (start < PUNCTUATIONS.size) PUNCTUATIONS.subList(start, end) else emptyList()
+                val end = kotlin.math.min(start + 8, SPECIAL_CHARS.size)
+                if (start < SPECIAL_CHARS.size) SPECIAL_CHARS.subList(start, end) else emptyList()
             } else {
                 val start = radialPage * 8
                 val end = kotlin.math.min(start + 8, currentPredictions.size)
@@ -1077,20 +1110,28 @@ class OdinT9Service : InputMethodService() {
             }.joinToString("   ")
         }
 
-        // 3. Shortened Pagination: [1/3]
+        tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
+
+        // We are typing, so hide the Mode Badge
+        tvModeBadge.visibility = View.GONE
+
+        // 3. Calculate and show the Pagination Badge if needed
         if (isRadialMenuOpen) {
-            val maxPages = if (isPunctuationMode) {
-                kotlin.math.ceil(PUNCTUATIONS.size / 8.0).toInt()
+            val maxPages = if (isSpecialCharMode) {
+                kotlin.math.ceil(SPECIAL_CHARS.size / 8.0).toInt()
             } else {
                 kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
             }
+            
             if (maxPages > 1) {
-                display += "   <font color='#888888'><i>[${radialPage + 1}/$maxPages]</i></font>"
+                tvPaginationBadge.text = "[${radialPage + 1}/$maxPages]"
+                tvPaginationBadge.visibility = View.VISIBLE
+            } else {
+                tvPaginationBadge.visibility = View.GONE
             }
+        } else {
+            tvPaginationBadge.visibility = View.GONE
         }
-        
-        tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
-
 
         // 4. THE CRASH FIX: Capture state and use Try/Catch Failsafes
         val capturedSelectedIndex = radialSelectedIndex
@@ -1166,7 +1207,7 @@ class OdinT9Service : InputMethodService() {
         val ic = currentInputConnection ?: return word
         
         // 2. Manual Brute-Force Check
-        // Grab the 3 characters right before the cursor to check for punctuation and spaces
+        // Grab the 3 characters right before the cursor to check for special characters and spaces
         val textBefore = ic.getTextBeforeCursor(3, 0)?.toString() ?: ""
         
         val isStartOfSentence = textBefore.isEmpty() || 
@@ -1196,15 +1237,17 @@ class OdinT9Service : InputMethodService() {
      * Displays the resting dots and the inconspicuous Mode Badge.
      */
     private fun setRestingUI(isComposingEmpty: Boolean = false) {
-        val modeBadge = if (currentMode == InputMode.T9) "[T9]" else "[ABC]"
         val baseText = if (isComposingEmpty) {
             "<b><font color='#A3FF00'>[...]</font></b>"
         } else {
             "..."
         }
+        tvPredictions.text = android.text.Html.fromHtml(baseText, android.text.Html.FROM_HTML_MODE_LEGACY)
         
-        // Use a dark, inconspicuous grey for the badge, tucked away with spacing
-        val display = "$baseText &nbsp;&nbsp;&nbsp; <font color='#444444'><small>$modeBadge</small></font>"
-        tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
+        tvModeBadge.text = if (currentMode == InputMode.T9) "[T9]" else "[ABC]"
+        tvModeBadge.visibility = View.VISIBLE
+        
+        // Hide pagination when resting!
+        tvPaginationBadge.visibility = View.GONE 
     }
 }

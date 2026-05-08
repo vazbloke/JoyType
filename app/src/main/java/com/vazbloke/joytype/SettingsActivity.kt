@@ -1,4 +1,4 @@
-package com.vazbloke.t9controller
+package com.vazbloke.joytype
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -135,7 +135,7 @@ class SettingsActivity : AppCompatActivity() {
         private var originalSummary: CharSequence? = null
 
         val actionKeys = listOf(
-            "key_accept", "key_cycle_fwd", "key_cycle_back", "key_cycle_prev", 
+            "key_accept", "key_cycle_fwd", "key_cycle_back", "key_recompose", 
             "key_backspace_word", "key_backspace_stroke", 
             "key_add_space", "key_clear_text", "key_enter", 
             "key_undo", "key_close", "key_open_settings", "key_word_left", "key_word_right", "key_toggle_mode", "key_add_to_dict"
@@ -157,7 +157,7 @@ class SettingsActivity : AppCompatActivity() {
             // Added key_mod_1 and key_mod_2 to the listenable list!
             val bindableKeys = listOf(
                 "key_mod_1", "key_mod_2", 
-                "key_accept", "key_cycle_prev", "key_backspace_word",
+                "key_accept", "key_recompose", "key_backspace_word",
                 "key_backspace_stroke", "key_add_space", "key_clear_text", "key_enter", 
                 "key_undo", "key_close", "key_open_settings"
             )

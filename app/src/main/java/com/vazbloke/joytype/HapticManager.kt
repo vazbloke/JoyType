@@ -1,4 +1,4 @@
-package com.vazbloke.t9controller
+package com.vazbloke.joytype
 
 import android.content.Context
 import android.os.Build

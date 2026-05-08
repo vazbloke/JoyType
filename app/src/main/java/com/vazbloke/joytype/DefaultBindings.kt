@@ -1,4 +1,4 @@
-package com.vazbloke.t9controller
+package com.vazbloke.joytype
 
 import android.view.KeyEvent
 
@@ -8,7 +8,7 @@ object DefaultBindings {
         "key_mod_2" to KeyEvent.KEYCODE_BUTTON_Z,
         "key_mod_3" to -1,
         "key_accept" to KeyEvent.KEYCODE_BUTTON_R1,
-        "key_cycle_prev" to KeyEvent.KEYCODE_BUTTON_L1, 
+        "key_recompose" to KeyEvent.KEYCODE_BUTTON_L1, 
         "key_backspace_word" to KeyEvent.KEYCODE_BUTTON_Y,
         "key_backspace_stroke" to KeyEvent.KEYCODE_BUTTON_B,
         "key_add_space" to KeyEvent.KEYCODE_BUTTON_A,

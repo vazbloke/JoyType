@@ -5,19 +5,26 @@
     <androidx.preference.PreferenceCategory android:title="Typing Behavior">
         <androidx.preference.SwitchPreferenceCompat
             android:key="autospace_after_accept"
-            android:title="Autospace after accepting"
-            android:summary="Automatically add a space when a prediction is accepted"
+            android:title="Auto-space after Accept (T9 Mode)"
+            android:summary="Automatically inserts a space after confirming a word"
             android:defaultValue="true" />
         <androidx.preference.SwitchPreferenceCompat
             android:key="double_accept_period"
-            android:title="Double Accept for Period"
+            android:title="Double Accept for Period (T9 Mode)"
             android:summary="Double tap the Accept key to insert a period and space"
             android:defaultValue="true" />
         <androidx.preference.SwitchPreferenceCompat
             android:key="auto_capitalization"
-            android:title="Auto-Capitalization"
+            android:title="Auto-Capitalization (T9 Mode)"
             android:summary="Automatically capitalize the first word of a sentence"
             android:defaultValue="true" />
+        <SeekBarPreference
+            app:key="key_repeat_delay"
+            app:title="Key Repeat Delay (ms)"
+            app:min="200"
+            android:max="1000" 
+            app:defaultValue="600"
+            app:showSeekBarValue="true" />
         <androidx.preference.SwitchPreferenceCompat
             android:key="visual_debug_mode"
             android:title="Visual Debug Mode"
@@ -42,19 +49,22 @@
     </androidx.preference.PreferenceCategory>
 
     <androidx.preference.PreferenceCategory android:title="Modifier Keys">
-        <com.vazbloke.t9controller.LongClickPreference android:key="key_mod_1" android:title="Modifier 1 (M1) Key" />
-        <com.vazbloke.t9controller.LongClickPreference android:key="key_mod_2" android:title="Modifier 2 (M2) Key" />
-        <com.vazbloke.t9controller.LongClickPreference android:key="key_mod_3" android:title="Modifier 3 (M3) Key" />
+        <com.vazbloke.joytype.LongClickPreference
+            android:key="key_mod_1" android:title="Modifier 1 (M1) Key" />
+        <com.vazbloke.joytype.LongClickPreference
+            android:key="key_mod_2" android:title="Modifier 2 (M2) Key" />
+        <com.vazbloke.joytype.LongClickPreference
+            android:key="key_mod_3" android:title="Modifier 3 (M3) Key" />
     </androidx.preference.PreferenceCategory>
 
     <androidx.preference.PreferenceCategory android:title="Joystick Bindings">
-        <com.vazbloke.t9controller.InlineSpinnerPreference
+        <com.vazbloke.joytype.InlineSpinnerPreference
             android:key="joy_radial_mod"
             android:title="Radial Prediction Selection"
             app:summary="Select the modifier required to open the radial word/punctuation menu"
             android:defaultValue="M1" />
             
-        <com.vazbloke.t9controller.InlineSpinnerPreference
+        <com.vazbloke.joytype.InlineSpinnerPreference
             android:key="joy_cursor_mod"
             android:title="Cursor Control"
             app:summary="Select the modifier required to move the text cursor with the analog stick"
@@ -62,18 +72,47 @@
     </androidx.preference.PreferenceCategory>
 
     <PreferenceCategory android:title="Key Bindings">
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_accept" android:title="Accept Prediction" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_cycle_prev" android:title="Cycle Previously Accepted Word" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_backspace_word" android:title="Backspace Entire Word" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_backspace_stroke" android:title="Backspace Active Stroke / Character" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_add_space" android:title="Add Space" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_clear_text" android:title="Clear Entire Textbox" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_enter" android:title="Enter / Send / Go" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_undo" android:title="Undo Last Operation" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_close" android:title="Close Keyboard" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_cycle_fwd" android:title="Cycle Prediction Forward" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_cycle_back" android:title="Cycle Prediction Backward" />
-        <com.vazbloke.t9controller.KeyBindingPreference android:key="key_open_settings" android:title="Open Settings" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_accept" android:title="Accept Prediction" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_recompose" android:title="Recompose Accepted Word" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_backspace_word" android:title="Backspace Entire Stroke / Word" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_backspace_stroke" android:title="Backspace Active Stroke / Character" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_add_space" android:title="Add Space" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_enter" android:title="Enter / Send / Go" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_undo" android:title="Undo Last Operation" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_cycle_fwd" android:title="Cycle Prediction Forward" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_cycle_back" android:title="Cycle Prediction Backward" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_clear_text" android:title="Clear Entire Textbox" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_toggle_mode" android:title="Toggle Input Mode" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_add_to_dict" android:title="Add Word to Dictionary" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_close" android:title="Close Keyboard" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_open_settings" android:title="Open Settings" />
     </PreferenceCategory>
+
+    <androidx.preference.PreferenceCategory android:title="Experimental">
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="pair_input_mode"
+            android:title="Pair Input Mode"
+            android:summary="Allows typing two letters consecutively without returning the joystick fully to the center"
+            android:defaultValue="false" />
+
+        <Preference
+            android:key="manage_custom_dict"
+            android:title="Manage Custom Dictionary"
+            android:summary="View, edit, or delete your saved words" />
+    </androidx.preference.PreferenceCategory>
 
 </androidx.preference.PreferenceScreen>

@@ -1,11 +1,10 @@
-package com.vazbloke.t9controller
+package com.vazbloke.joytype
 
 import android.content.Context
 import android.os.Environment
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
-import kotlin.math.log
 
 class TrieNode(
     var isWord: Boolean = false,
@@ -15,7 +14,7 @@ class TrieNode(
 
 class T9Engine {
     private val charToDigit = mapOf(
-        '\'' to '1', 'j' to '1', 'k' to '1', 'l' to '1', // NEW: Option A mapping
+        'j' to '1', 'k' to '1', 'l' to '1',
         'a' to '2', 'b' to '2', 'c' to '2',
         'd' to '3', 'e' to '3', 'f' to '3',
         'g' to '4', 'h' to '4', 'i' to '4',
@@ -27,7 +26,7 @@ class T9Engine {
     )
 
     private val digitToChars = mapOf(
-        '1' to listOf('\'', 'j', 'k', 'l'), // NEW
+        '1' to listOf('j', 'k', 'l'), // NEW
         '2' to listOf('a', 'b', 'c'),
         '3' to listOf('d', 'e', 'f'),
         '4' to listOf('g', 'h', 'i'),
@@ -239,7 +238,8 @@ class T9Engine {
 
     // Change this from private to public in T9Engine.kt
     fun wordToSequence(word: String): String {
-        return word.map { charToDigit[it] ?: '0' }.joinToString("")
+        // THE FIX: Force lowercase so capitalized words don't crash into a '0' mapping!
+        return word.lowercase().map { charToDigit[it] ?: '0' }.joinToString("")
     }
 
     // Find getCustomDictFile() and make it public so our Activity can use it:

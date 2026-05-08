@@ -1,11 +1,11 @@
-package com.vazbloke.t9controller
+package com.vazbloke.joytype
 
 import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
 import android.view.View
 
-class SwipeDebugView @JvmOverloads constructor(
+class VisualDebugView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
 

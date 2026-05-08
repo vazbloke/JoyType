@@ -38,6 +38,9 @@ class JoyTypeService : InputMethodService() {
     private var radialPage = 0 
     private var radialLastOctant = -1
     
+    private var lastPhysicalZone: Int = -1
+    private var virtualRadialIndex: Int = -1
+    
     // Master Special character List (32 Symbols = 4 Pages)
     private val SPECIAL_CHARS = listOf(
         ".", ",", "?", "!", "@", "-", "_", ":", 
@@ -355,38 +358,57 @@ class JoyTypeService : InputMethodService() {
                         kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
                     }
 
-                    if (radialLastOctant != -1) {
+                    if (radialLastOctant != -1 && octant != radialLastOctant) {
+                        
+                        // THE FIX: Calculate physical rotation direction
+                        var delta = octant - radialLastOctant
+                        if (delta > 4) delta -= 8
+                        if (delta < -4) delta += 8
+                        
+                        val isMovingForward = delta > 0 // Clockwise
+                        val isMovingBackward = delta < 0 // Counter-Clockwise
+                        var justPegged = false
+
                         // Clockwise crossover (7 to 0)
                         if (radialLastOctant == 7 && octant == 0) {
                             if (isPeggedAtStart) {
-                                isPeggedAtStart = false // THE FIX: Just unpeg, don't turn the page!
+                                isPeggedAtStart = false 
+                                haptics.tick() // Tick on unpeg (7->0 retreat!)
                             } else if (radialPage < maxPages - 1) {
                                 radialPage++
                             } else if (!isPeggedAtEnd) {
                                 isPeggedAtEnd = true
-                                haptics.thud() // THUNK!
+                                justPegged = true
+                                haptics.thud() // Initial THUNK!
                             }
                         }
                         // Counter-Clockwise crossover (0 to 7)
                         else if (radialLastOctant == 0 && octant == 7) {
                             if (isPeggedAtEnd) {
-                                isPeggedAtEnd = false // THE FIX: Just unpeg, don't turn the page!
+                                isPeggedAtEnd = false 
+                                haptics.tick() // Tick on unpeg (0->7 retreat!)
                             } else if (radialPage > 0) {
                                 radialPage--
                             } else if (!isPeggedAtStart) {
                                 isPeggedAtStart = true
-                                haptics.thud() // THUNK!
+                                justPegged = true
+                                haptics.thud() // Initial THUNK!
+                            }
+                        }
+
+                        // THE DIRECTIONAL GRINDING GEAR:
+                        if (!justPegged) {
+                            if (isPeggedAtStart) {
+                                // If we are pegged at 0, moving backward (7, 6, 5) thuds. Moving forward (5, 6, 7) ticks!
+                                if (isMovingBackward) haptics.thud() else haptics.tick()
+                            } else if (isPeggedAtEnd) {
+                                // If we are pegged at Max, moving forward thuds. Moving backward ticks!
+                                if (isMovingForward) haptics.thud() else haptics.tick()
                             }
                         }
                     }
 
                     radialLastOctant = octant
-
-                    // Un-peg if the user pulls the stick down away from the top boundary
-                    if (octant in 2..6) {
-                        isPeggedAtStart = false
-                        isPeggedAtEnd = false
-                    }
 
                     val currentItems = if (isSpecialCharMode) {
                         val start = radialPage * 8
@@ -410,7 +432,7 @@ class JoyTypeService : InputMethodService() {
 
                         if (newIndex != radialSelectedIndex) {
                             radialSelectedIndex = newIndex
-                            // Only tick if they aren't pushing against a wall
+                            // Only tick for normal valid scrolling (unpegged)
                             if (!isPeggedAtStart && !isPeggedAtEnd) {
                                 haptics.tick()
                             }
@@ -702,7 +724,32 @@ class JoyTypeService : InputMethodService() {
                     val actualIndex = (radialPage * 8) + radialSelectedIndex
                     if (actualIndex < SPECIAL_CHARS.size) {
                         saveUndoSnapshot()
-                        ic?.commitText(SPECIAL_CHARS[actualIndex], 1)
+                        
+                        val charToCommit = SPECIAL_CHARS[actualIndex]
+                        
+                        // THE FIX: Smart Punctuation (Cling to left word)
+                        val clingyPunctuation = listOf(".", ",", "?", "!", ":", ";", ")", "]", "}")
+                        
+                        if (clingyPunctuation.contains(charToCommit)) {
+                            ic?.beginBatchEdit()
+                            val textBefore = ic?.getTextBeforeCursor(1, 0)?.toString() ?: ""
+                            
+                            // If there is an auto-space in the way, eat it!
+                            if (textBefore == " ") {
+                                ic?.deleteSurroundingText(1, 0) 
+                            }
+                            
+                            ic?.commitText(charToCommit, 1)
+                            
+                            // Re-apply the space on the right side if autoSpace is on!
+                            if (autoSpace) { 
+                                ic?.commitText(" ", 1)
+                            }
+                            ic?.endBatchEdit()
+                        } else {
+                            // Normal characters (like @ or /) just commit exactly where they are
+                            ic?.commitText(charToCommit, 1)
+                        }
                     }
                 } else if (currentPredictions.isNotEmpty()) {
                     saveUndoSnapshot()
@@ -758,7 +805,17 @@ class JoyTypeService : InputMethodService() {
                 if (currentPredictions.isNotEmpty()) {
                     if (currentMode == InputMode.T9) {
                         // --- T9 MODE ---
-                        val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+                        var wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+
+                        // If typing right up against punctuation, inject a space first.
+                        if (autoSpace) {
+                            val textBefore = ic.getTextBeforeCursor(1, 0)?.toString() ?: ""
+                            val requiresPreSpace = listOf(".", ",", "?", "!", ":", ";", ")", "]", "}").contains(textBefore)
+                            if (requiresPreSpace) {
+                                wordToCommit = " $wordToCommit"
+                            }
+                        }
+
                         ic.commitText(wordToCommit, 1)
 
                         // Smart Auto-Space checks if a space or special character is already there!
@@ -768,28 +825,43 @@ class JoyTypeService : InputMethodService() {
                                 ic.commitText(" ", 1)
                             }
                         }
-                        lastAcceptTime = now // Allow double-tap period next
                     } else {
                         // --- MANUAL MODE ---
                         // Absolute raw control. No capitalization, no spaces.
                         ic.commitText(currentPredictions[predictionIndex], 1)
-                        // Do NOT update lastAcceptTime. We don't want double-tap periods in Manual Mode!
                     }
+                    
+                    val wasT9 = currentMode == InputMode.T9
                     resetState()
+                    
+                    // Set the timestamp AFTER resetState() to guarantee it isn't accidentally cleared!
+                    if (wasT9) {
+                        lastAcceptTime = now 
+                    }
                 } else {
                     // --- RESTING STATE (No active strokes) ---
                     // Double Accept Period ONLY triggers in T9 Mode
                     if (currentMode == InputMode.T9 && doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
+                        
+                        // THE FIX: Wrap in a Batch Edit so the deletion and period happen atomically!
+                        ic.beginBatchEdit()
                         val textBefore = ic.getTextBeforeCursor(10, 0)?.toString() ?: ""
                         val spacesMatch = Regex("\\s+$").find(textBefore) 
                         if (spacesMatch != null) {
                             ic.deleteSurroundingText(spacesMatch.value.length, 0)
                         }
                         ic.commitText(". ", 1)
+                        ic.endBatchEdit()
+                        
                         lastAcceptTime = 0L // Reset so a 3rd tap doesn't add another period
                     } else {
-                        // THE FIX: If there are no predictions and no double-tap, do NOTHING. 
                         // Do NOT insert a phantom space!
+                        
+                        // THE CORE FIX: Even if we do nothing visually, we MUST record 
+                        // this tap's timestamp so the next tap knows it was a double-tap!
+                        if (currentMode == InputMode.T9) {
+                            lastAcceptTime = now
+                        }
                     }
                 }
             }
@@ -1113,9 +1185,18 @@ class JoyTypeService : InputMethodService() {
         var display = if (isRadialMenuOpen) {
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
             itemsToDraw.mapIndexed { index, word ->
-                val dir = if (index < arrows.size) arrows[index] else ""
-                if (index == radialSelectedIndex) "<b><font color='#FFA500'>[$dir $word]</font></b>" 
-                else "<font color='#555555'>$dir $word</font>"
+                // Inject spaces around the character to widen the display for symbols
+                val textToDraw = if (isSpecialCharMode) "  $word  " else word
+                
+                // Build the arrow string with a trailing space
+                val dir = if (index < arrows.size) "${arrows[index]} " else ""
+                
+                if (index == radialSelectedIndex) {
+                    // THE FIX: The brackets and arrow are gray (#555555). Only textToDraw is Orange (#FFA500)
+                    "<b>[<font color='#555555'>$dir</font><font color='#FFA500'>$textToDraw</font><font color='#555555'>]</font></b>" 
+                } else {
+                    "<font color='#555555'>$dir$textToDraw</font>"
+                }
             }.joinToString("   ")
         } else {
             itemsToDraw.mapIndexed { index, word ->
@@ -1214,20 +1295,18 @@ class JoyTypeService : InputMethodService() {
 
     private fun getCapitalizedWord(word: String): String {
         if (!autoCap) return word
-        
-        // 1. Hardcode for the English standalone "I"
         if (word.lowercase() == "i") return "I"
         
         val ic = currentInputConnection ?: return word
         
-        // 2. Manual Brute-Force Check
-        // Grab the 3 characters right before the cursor to check for special characters and spaces
         val textBefore = ic.getTextBeforeCursor(3, 0)?.toString() ?: ""
         
+        // Trim trailing spaces so it recognizes "Hello." and "Hello. " equally!
+        val trimmedBefore = textBefore.trimEnd()
         val isStartOfSentence = textBefore.isEmpty() || 
-                                textBefore.endsWith(". ") || 
-                                textBefore.endsWith("! ") || 
-                                textBefore.endsWith("? ") || 
+                                trimmedBefore.endsWith(".") || 
+                                trimmedBefore.endsWith("!") || 
+                                trimmedBefore.endsWith("?") || 
                                 textBefore.endsWith("\n")
 
         if (isStartOfSentence) {

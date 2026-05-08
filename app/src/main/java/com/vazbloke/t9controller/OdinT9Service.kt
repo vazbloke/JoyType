@@ -45,9 +45,15 @@ class OdinT9Service : InputMethodService() {
     // NEW: Pagination State
     private var radialPage = 0 
     private var radialLastOctant = -1
-    private val punctuationsP1 = listOf(".", ",", "?", "!", "-", "'", "@", ":")
-    private val punctuationsP2 = listOf("\"", "(", ")", "/", "\\", "_", ";", "&") // Add whatever you want here!
-
+    
+    // Master Punctuation List (32 Symbols = 4 Pages)
+    private val PUNCTUATIONS = listOf(
+        ".", ",", "?", "!", "@", "-", "_", ":", 
+        ";", "'", "\"", "(", ")", "/", "\\", "&", 
+        "#", "%", "*", "+", "=", "<", ">", "$", 
+        "~", "`", "{", "}", "[", "]", "|", "^"
+    )
+    
     private var circleDetectedThisStroke = false
 
     private var currentPredictions = listOf<String>()
@@ -61,16 +67,30 @@ class OdinT9Service : InputMethodService() {
     private var visualDebug = true     // NEW
     private var lastAcceptTime = 0L
 
-    // Vibrate options
-    private var vibrateOnType = true
-    private var vibrateDuration = 15L
-    private lateinit var vibrator: Vibrator
+    private lateinit var haptics: HapticManager
 
-    // --- Cursor UI State ---
-    private var lastCursorMoveTime = 0L
+    // --- Cursor Glide State ---
+    private val cursorHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var isCursorGliding = false
+    private var cursorX = 0f
+    private var cursorY = 0f
+    private var cursorMag = 0f
+    // Local math trackers to bypass IPC
+    private var glideCursorIndex = 0
+    private var glideTextLength = 0
 
     private lateinit var tvPredictions: TextView
     private lateinit var hsvPredictions: android.widget.HorizontalScrollView
+
+    // --- Live Reload Receiver ---
+    private val dictReloadReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            if (intent?.action == "com.vazbloke.t9controller.RELOAD_DICT") {
+                t9Engine.fullReload(this@OdinT9Service)
+                android.widget.Toast.makeText(this@OdinT9Service, "Custom Dictionary Reloaded", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     enum class ModifierKey { NONE, M1, M2, M3 }
     
@@ -82,8 +102,11 @@ class OdinT9Service : InputMethodService() {
         ACCEPT, CYCLE_PREV, BACKSPACE_WORD, BACKSPACE_STROKE, 
         ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, ENTER, 
         CLOSE_KEYBOARD, CURSOR_WORD_LEFT, CURSOR_WORD_RIGHT,
-        CYCLE_FWD, CYCLE_BACK // NEW
+        CYCLE_FWD, CYCLE_BACK, TOGGLE_MODE, ADD_TO_DICT
     }
+
+    enum class InputMode { T9, ABC } // NEW
+    private var currentMode = InputMode.T9
 
     // Modifier State
     private var isM1Held = false
@@ -114,8 +137,8 @@ class OdinT9Service : InputMethodService() {
     private val repeatRunnable = object : Runnable {
         override fun run() {
             repeatingAction?.let {
-                executeAction(it)
-                repeatHandler.postDelayed(this, 50L) // 50ms firing rate once the delay is passed
+                executeAction(it, isRepeat = true) // Flag for reduced vibrate
+                repeatHandler.postDelayed(this, 100L) 
             }
         }
     }
@@ -130,40 +153,66 @@ class OdinT9Service : InputMethodService() {
     private var lastDetectionType = ""
     private val registeredDebugPeaks = mutableListOf<PointF>()
 
-    // --- Cursor Glide State ---
-    private val cursorHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var isCursorGliding = false
-    private var cursorX = 0f
-    private var cursorY = 0f
-    private var cursorMag = 0f
-
     private val cursorGlideRunnable = object : Runnable {
         override fun run() {
             if (!isCursorGliding) return
             val ic = currentInputConnection ?: return
             
-            // Analog Speed Math: Hard push = 30ms delay (fast), Soft push = 200ms delay (slow)
-            val delay = 200L - (cursorMag * 170L).toLong()
+            val delay = 200L - (cursorMag * 160L).toLong()
             
             if (kotlin.math.abs(cursorX) > kotlin.math.abs(cursorY)) {
-                if (cursorX > 0) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT))
-                else ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
+                // HORIZONTAL MOVEMENT: Use mathematically pure IMS selection
+                if (cursorX > 0) {
+                    if (glideCursorIndex < glideTextLength) glideCursorIndex++
+                } else {
+                    if (glideCursorIndex > 0) glideCursorIndex--
+                }
+                // Force the cursor to our exact calculated index, bypassing hardware key listeners!
+                // Fixed: Lock the text box state so Chrome can't hijack the cursor mid-move!
+                ic.beginBatchEdit()
+                ic.setSelection(glideCursorIndex, glideCursorIndex)
+                ic.endBatchEdit()
             } else {
-                if (cursorY > 0) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN))
-                else ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP))
+                // VERTICAL MOVEMENT: We still must use DPAD here. 
+                // Software keyboards cannot know where visual line breaks occur on the screen, 
+                // so we have to rely on Android's native vertical text navigation.
+                if (cursorY > 0) {
+                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN))
+                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_DOWN))
+                } else {
+                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP))
+                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_UP))
+                }
+                
+                // Re-sync our local tracker just in case the DPAD vertical move changed our index
+                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
+                glideCursorIndex = extracted?.selectionStart ?: glideCursorIndex
             }
             
-            cursorHandler.postDelayed(this, delay.coerceAtLeast(20L))
+            haptics.tick() 
+            cursorHandler.postDelayed(this, delay.coerceAtLeast(40L))
         }
     }
 
     override fun onCreate() {
         super.onCreate()
-        vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        haptics = HapticManager(this)
         prefs = PreferenceManager.getDefaultSharedPreferences(this)
         t9Engine.loadDictionary(this)
-//        swipeEngine.dictionary = t9Engine.getAllWords()
         loadSettings()
+
+        // Register the receiver
+        val filter = android.content.IntentFilter("com.vazbloke.t9controller.RELOAD_DICT")
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(dictReloadReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(dictReloadReceiver, filter)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(dictReloadReceiver)
     }
 
     override fun onWindowShown() {
@@ -177,8 +226,9 @@ class OdinT9Service : InputMethodService() {
         autoCap = prefs.getBoolean("auto_capitalization", true)
         visualDebug = prefs.getBoolean("visual_debug_mode", true)
 
-        vibrateOnType = prefs.getBoolean("vibrate_on_type", true)
-        vibrateDuration = prefs.getInt("vibrate_duration", 15).toLong()
+        // Inside loadSettings():
+        haptics.isEnabled = prefs.getBoolean("vibrate_on_type", true)
+        haptics.customDuration = prefs.getInt("vibrate_duration", 15).toLong()
 
         repeatDelay = prefs.getInt("key_repeat_delay", 600).toLong()
 
@@ -242,6 +292,8 @@ class OdinT9Service : InputMethodService() {
         bind(Action.CURSOR_WORD_RIGHT, "key_word_right", "mod_word_right")
         bind(Action.CYCLE_FWD, "key_cycle_fwd", "mod_cycle_fwd")
         bind(Action.CYCLE_BACK, "key_cycle_back", "mod_cycle_back")
+        bind(Action.TOGGLE_MODE, "key_toggle_mode", "mod_toggle_mode")
+        bind(Action.ADD_TO_DICT, "key_add_to_dict", "mod_add_to_dict")
     }
 
     override fun onCreateInputView(): View {
@@ -253,11 +305,11 @@ class OdinT9Service : InputMethodService() {
         hsvPredictions = view.findViewById(R.id.hsv_predictions) 
         
         swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
-        tvPredictions.text = "..."
+        setRestingUI()
 
         // Toast instruction
         tvPredictions.setOnClickListener {
-            if (tvPredictions.text.toString() == "...") {
+            if (currentPredictions.isEmpty() && !isRadialMenuOpen) {
                 android.widget.Toast.makeText(this, "Flick joystick to start typing", android.widget.Toast.LENGTH_SHORT).show()
             }
         }
@@ -292,7 +344,11 @@ class OdinT9Service : InputMethodService() {
                     if (angle < 0) angle += 2 * Math.PI
 
                     val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
-                    val maxPages = if (isPunctuationMode) 2 else kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
+                    val maxPages = if (isPunctuationMode) {
+                        kotlin.math.ceil(PUNCTUATIONS.size / 8.0).toInt()
+                    } else {
+                        kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
+                    }
 
                     if (radialLastOctant != -1) {
                         // Clockwise crossover (7 to 0)
@@ -303,7 +359,7 @@ class OdinT9Service : InputMethodService() {
                                 radialPage++
                             } else if (!isPeggedAtEnd) {
                                 isPeggedAtEnd = true
-                                triggerHardHapticClick() // THUNK!
+                                haptics.thud() // THUNK!
                             }
                         }
                         // Counter-Clockwise crossover (0 to 7)
@@ -314,7 +370,7 @@ class OdinT9Service : InputMethodService() {
                                 radialPage--
                             } else if (!isPeggedAtStart) {
                                 isPeggedAtStart = true
-                                triggerHardHapticClick() // THUNK!
+                                haptics.thud() // THUNK!
                             }
                         }
                     }
@@ -328,7 +384,9 @@ class OdinT9Service : InputMethodService() {
                     }
 
                     val currentItems = if (isPunctuationMode) {
-                        if (radialPage == 0) punctuationsP1 else punctuationsP2
+                        val start = radialPage * 8
+                        val end = kotlin.math.min(start + 8, PUNCTUATIONS.size)
+                        if (start < PUNCTUATIONS.size) PUNCTUATIONS.subList(start, end) else emptyList()
                     } else {
                         val start = radialPage * 8
                         val end = kotlin.math.min(start + 8, currentPredictions.size)
@@ -349,7 +407,7 @@ class OdinT9Service : InputMethodService() {
                             radialSelectedIndex = newIndex
                             // Only tick if they aren't pushing against a wall
                             if (!isPeggedAtStart && !isPeggedAtEnd) {
-                                triggerHapticClick()
+                                haptics.tick()
                             }
                         }
                         updateUI()
@@ -377,6 +435,12 @@ class OdinT9Service : InputMethodService() {
                     cursorMag = mag
                     if (!isCursorGliding) {
                         isCursorGliding = true
+
+                        // Capture the exact state of the text box ONCE to start the math
+                        val extracted = currentInputConnection?.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
+                        glideCursorIndex = extracted?.selectionStart ?: 0
+                        glideTextLength = extracted?.text?.length ?: 0
+
                         cursorHandler.post(cursorGlideRunnable) // Start gliding!
                     }
                 } else {
@@ -405,7 +469,7 @@ class OdinT9Service : InputMethodService() {
 
         if (mag > 0.5f && !vibratedThisStroke) {
             vibratedThisStroke = true
-            triggerHapticClick() 
+            haptics.click() 
         }
 
         // --- PAIR INPUT MODE (Dual-Heuristic Detection) ---
@@ -415,23 +479,27 @@ class OdinT9Service : InputMethodService() {
                 peakPt = PointF(mapped.x, mapped.y)
                 peakMag = mag
             }
-            
+
             var triggeredPair = false
 
-            // Heuristic A: The Diagonal Slice
-            if (mag < peakMag - 0.25f) { 
+            // Heuristic A: The Diagonal Slice (Valley)
+            // TIGHTENED: Require a deeper drop (-0.4f instead of -0.25f) to prove they truly crossed the center
+            if (mag < peakMag - 0.4f) { 
                 inValley = true 
-            } else if (inValley && mag > lastMag + 0.05f && mag > 0.3f) {
+            // TIGHTENED: Require a stronger push out of the valley (> 0.45f instead of > 0.3f)
+            } else if (inValley && mag > lastMag + 0.05f && mag > 0.45f) {
                 triggeredPair = true 
-                lastDetectionType = "Diagonal-slice" // LOG IT!
+                lastDetectionType = "Diagonal-slice"
             }
 
             // Heuristic B: The Rim-Roll
-            if (!triggeredPair && peakPt != null && peakMag > 0.5f) {
+            if (!triggeredPair && peakPt != null && peakMag > 0.6f) { // TIGHTENED: Peak must be stronger
                 val distFromPeak = getDistance(peakPt!!, mapped.x, mapped.y)
-                if (distFromPeak > 0.7f && mag > 0.4f) {
+                // TIGHTENED: Require a massive distance change (> 0.85f instead of > 0.7f) 
+                // AND demand they stay pinned hard against the outer edge (> 0.6f instead of > 0.4f)
+                if (distFromPeak > 0.85f && mag > 0.6f) {
                     triggeredPair = true 
-                    lastDetectionType = "Rim-roll" // LOG IT!
+                    lastDetectionType = "Rim-roll" 
                 }
             }
 
@@ -441,7 +509,7 @@ class OdinT9Service : InputMethodService() {
                 updateLivePredictions()
                 
                 vibratedThisStroke = false 
-                triggerHapticClick()
+                haptics.tick()
                 
                 currentStrokePath.clear()
                 currentStrokePath.add(PointF(mapped.x, mapped.y))
@@ -468,18 +536,39 @@ class OdinT9Service : InputMethodService() {
             lastMag = 0f
 
             if (currentStrokePath.isNotEmpty()) {
-                val maxPt = currentStrokePath.maxByOrNull { sqrt(it.x * it.x + it.y * it.y) }
-                if (maxPt != null && sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
-                    wordProbabilities.add(generateProbabilityMap(maxPt))
-                    registeredDebugPeaks.add(maxPt) // SAVE THE PEAK!
+                val maxPt = currentStrokePath.maxByOrNull { kotlin.math.sqrt(it.x * it.x + it.y * it.y) }
+                if (maxPt != null && kotlin.math.sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
                     
-                    // Only label it a normal flick if pair input didn't already trigger something else
-                    if (lastDetectionType.isEmpty()) lastDetectionType = "Normal flick" 
+                    if (currentMode == InputMode.T9) {
+                        // --- NORMAL PREDICTIVE MODE ---
+                        wordProbabilities.add(generateProbabilityMap(maxPt))
+                        registeredDebugPeaks.add(maxPt) 
+                        if (lastDetectionType.isEmpty()) lastDetectionType = "Normal flick" 
+                        updateLivePredictions()
+                    } else {
+                        // --- MANUAL ABC MODE ---
+                        val digitMap = generateProbabilityMap(maxPt)
+                        val winningDigit = digitMap.maxByOrNull { it.value }?.key ?: '5'
+                        
+                        val baseChars = t9Engine.getCharsForDigit(winningDigit)
+                        val chars = mutableListOf<String>()
+                        
+                        // 1. Add lowercase characters
+                        chars.addAll(baseChars.map { it.toString() })
+                        // 2. Add uppercase characters
+                        chars.addAll(baseChars.map { it.uppercaseChar().toString() })
+                        // 3. Add the number
+                        chars.add(winningDigit.toString())
+                        
+                        currentPredictions = chars
+                        predictionIndex = 0
+                        isRadialMenuOpen = false 
+                        
+                        lastDetectionType = "Manual Entry"
+                    }
                 }
                 currentStrokePath.clear()
-                updateLivePredictions()
-                
-                // Update the debug view one last time so the final state persists on screen
+                updateUI()
                 swipeDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
             }
             return
@@ -599,11 +688,13 @@ class OdinT9Service : InputMethodService() {
                 tvPredictions.translationY = 0f
 
                 val ic = currentInputConnection
-
+                
                 if (isPunctuationMode) {
-                    val items = if (radialPage == 0) punctuationsP1 else punctuationsP2
-                    saveUndoSnapshot()
-                    ic?.commitText(items[radialSelectedIndex], 1)
+                    val actualIndex = (radialPage * 8) + radialSelectedIndex
+                    if (actualIndex < PUNCTUATIONS.size) {
+                        saveUndoSnapshot()
+                        ic?.commitText(PUNCTUATIONS[actualIndex], 1)
+                    }
                 } else if (currentPredictions.isNotEmpty()) {
                     saveUndoSnapshot()
                     
@@ -632,46 +723,54 @@ class OdinT9Service : InputMethodService() {
         return super.onKeyUp(keyCode, event)
     }
 
-    private fun executeAction(action: Action) {
+    private fun executeAction(action: Action, isRepeat: Boolean = false) {
         val ic = currentInputConnection ?: return
+
+        // 2. Add this helper function
+        val fireActionHaptic = {
+            if (isRepeat) haptics.repeatTick() else haptics.click()
+        }
 
         when (action) {
             Action.ACCEPT -> {
                 saveUndoSnapshot()
-                triggerHapticClick()
+                fireActionHaptic()
                 val now = System.currentTimeMillis()
                 val ic = currentInputConnection ?: return
 
                 if (currentPredictions.isNotEmpty()) {
-                    val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
-                    ic.commitText(wordToCommit, 1)
-                    if (autoSpace) ic.commitText(" ", 1)
-                    lastAcceptTime = now
+                    if (currentMode == InputMode.T9) {
+                        // --- T9 MODE ---
+                        val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+                        ic.commitText(wordToCommit, 1)
+                        if (autoSpace) ic.commitText(" ", 1)
+                        lastAcceptTime = now // Allow double-tap period next
+                    } else {
+                        // --- MANUAL MODE ---
+                        // Absolute raw control. No capitalization, no spaces.
+                        ic.commitText(currentPredictions[predictionIndex], 1)
+                        // Do NOT update lastAcceptTime. We don't want double-tap periods in Manual Mode!
+                    }
+                    resetState()
                 } else {
-                    // FIX: Robust Double-Tap Period
-                    if (doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
+                    // --- RESTING STATE (No active strokes) ---
+                    // Double Accept Period ONLY triggers in T9 Mode
+                    if (currentMode == InputMode.T9 && doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
                         val textBefore = ic.getTextBeforeCursor(10, 0)?.toString() ?: ""
-                        // Hunt down any trailing spaces regardless of how many there are
                         val spacesMatch = Regex("\\s+$").find(textBefore) 
                         if (spacesMatch != null) {
                             ic.deleteSurroundingText(spacesMatch.value.length, 0)
                         }
                         ic.commitText(". ", 1)
-                        lastAcceptTime = 0L 
+                        lastAcceptTime = 0L // Reset so a 3rd tap doesn't add another period
                     } else {
-                        ic.commitText(" ", 1)
-                        lastAcceptTime = now
+                        // THE FIX: If there are no predictions and no double-tap, do NOTHING. 
+                        // Do NOT insert a phantom space!
                     }
                 }
-
-                // Save the exact probability state before resetting!
-                lastAcceptedProbabilities.clear()
-                lastAcceptedProbabilities.addAll(wordProbabilities)
-
-                resetState()
             }
             Action.BACKSPACE_WORD -> {
-                triggerHapticClick()
+                fireActionHaptic()
 
                 if (wordProbabilities.isNotEmpty()) {
                     // COMPOSING MODE: Nuke the entire active input thread
@@ -699,7 +798,7 @@ class OdinT9Service : InputMethodService() {
                 if (wordProbabilities.isNotEmpty()) return 
 
                 saveUndoSnapshot()
-                triggerHapticClick()
+                fireActionHaptic()
 
                 val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0) ?: return
                 val text = extracted.text.toString()
@@ -721,9 +820,11 @@ class OdinT9Service : InputMethodService() {
                 if (start < end) {
                     val targetWord = text.substring(start, end)
 
-                    // 3. Delete from the start of the word ALL THE WAY to the original cursor 
-                    // (This cleanly deletes the word AND the trailing spaces!)
-                    ic.setSelection(start, cursor)
+                    // THE FIX: Delete from the start of the word, to whichever is further right: 
+                    // The actual end of the word, or the cursor!
+                    val deleteEnd = kotlin.math.max(end, cursor)
+                    
+                    ic.setSelection(start, deleteEnd)
                     ic.commitText("", 1)
 
                     // 4. Reconstruct the active composing state
@@ -765,7 +866,7 @@ class OdinT9Service : InputMethodService() {
             Action.ADD_SPACE -> {
                 saveUndoSnapshot()
 
-                triggerHapticClick()
+                fireActionHaptic()
 
                 if (currentPredictions.isNotEmpty()) {
                     // If a word is queued up, accept it AND add a space
@@ -781,11 +882,13 @@ class OdinT9Service : InputMethodService() {
             }
             Action.CLEAR_TEXT -> {
                 saveUndoSnapshot()
+                fireActionHaptic()
                 ic.performContextMenuAction(android.R.id.selectAll)
                 ic.commitText("", 1)
             }
             Action.UNDO -> {
                 if (undoStack.isNotEmpty()) {
+                    fireActionHaptic()
                     val previousState = undoStack.pop()
                     ic.performContextMenuAction(android.R.id.selectAll)
                     ic.commitText(previousState, 1)
@@ -798,6 +901,7 @@ class OdinT9Service : InputMethodService() {
             }
             Action.ENTER -> {
                 saveUndoSnapshot()
+                fireActionHaptic()
                 val editorInfo = currentInputEditorInfo
                 
                 if (editorInfo != null) {
@@ -818,7 +922,7 @@ class OdinT9Service : InputMethodService() {
                 // requestHideSelf(0) 
             }
             Action.BACKSPACE_STROKE -> {
-                triggerHapticClick()
+                fireActionHaptic()
 
                 if (wordProbabilities.isNotEmpty()) {
                     // COMPOSING MODE: Delete the last joystick flick
@@ -831,18 +935,18 @@ class OdinT9Service : InputMethodService() {
                 }
             }
             Action.CLOSE_KEYBOARD -> {
-                triggerHapticClick()
+                fireActionHaptic()
                 requestHideSelf(0)
             }
             Action.CURSOR_WORD_LEFT -> {
-                triggerHapticClick()
+                fireActionHaptic()
                 val textBefore = ic.getTextBeforeCursor(100, 0)?.toString() ?: return
                 val match = Regex("\\s*\\S+\\s*$").find(textBefore)
                 val jumpLength = match?.value?.length ?: textBefore.length
                 for(i in 0 until jumpLength) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
             }
             Action.CURSOR_WORD_RIGHT -> {
-                triggerHapticClick()
+                fireActionHaptic()
                 val textAfter = ic.getTextAfterCursor(100, 0)?.toString() ?: return
                 val match = Regex("^\\s*\\S+").find(textAfter)
                 val jumpLength = match?.value?.length ?: textAfter.length
@@ -850,17 +954,49 @@ class OdinT9Service : InputMethodService() {
             }
             Action.CYCLE_FWD -> {
                 if (currentPredictions.isNotEmpty()) {
-                    triggerHapticClick()
+                    fireActionHaptic()
                     predictionIndex = (predictionIndex + 1) % currentPredictions.size
                     updateUI()
                 }
             }
             Action.CYCLE_BACK -> {
                 if (currentPredictions.isNotEmpty()) {
-                    triggerHapticClick()
+                    fireActionHaptic()
                     // Add currentPredictions.size to prevent negative modulo results!
                     predictionIndex = (predictionIndex - 1 + currentPredictions.size) % currentPredictions.size
                     updateUI()
+                }
+            }
+            Action.TOGGLE_MODE -> {
+                // THE FIX: Check if the user is actively typing a word
+                if (wordProbabilities.isNotEmpty()) {
+                    android.widget.Toast.makeText(this, "Cannot switch mode mid-type", android.widget.Toast.LENGTH_SHORT).show()
+                    // Optional: Play the "Thud" haptic so they feel the rejection!
+                    haptics.thud() 
+                    return
+                }
+
+                fireActionHaptic()
+                currentMode = if (currentMode == InputMode.T9) InputMode.ABC else InputMode.T9
+                resetState() 
+                updateUI()
+            }
+            Action.ADD_TO_DICT -> {
+                fireActionHaptic()
+                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0) ?: return
+                val text = extracted.text.toString()
+                val cursor = extracted.selectionStart
+
+                // Walk left and right to find the word under the cursor
+                var start = cursor
+                while (start > 0 && text[start - 1].isLetterOrDigit()) start--
+                var end = cursor
+                while (end < text.length && text[end].isLetterOrDigit()) end++
+
+                if (start < end) {
+                    val targetWord = text.substring(start, end)
+                    t9Engine.addCustomWord(targetWord)
+                    android.widget.Toast.makeText(this, "Added: '$targetWord'", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
             Action.NONE -> {}
@@ -885,7 +1021,7 @@ class OdinT9Service : InputMethodService() {
         currentPredictions = emptyList()
         predictionIndex = 0
         swipeDebugView.clear()
-        tvPredictions.text = "..."
+        setRestingUI()  
         isRadialMenuOpen = false
         isPunctuationMode = false
         radialPage = 0
@@ -907,21 +1043,16 @@ class OdinT9Service : InputMethodService() {
 
     private fun updateUI() {
         if (currentPredictions.isEmpty() && !isRadialMenuOpen) {
-            if (wordProbabilities.isNotEmpty()) {
-                // UX Polish: The user is mid-stroke, but the engine currently has no exact matches to show.
-                // Display a green indicator so they know the keyboard is still tracking their inputs!
-                tvPredictions.text = android.text.Html.fromHtml("<b><font color='#A3FF00'>[...]</font></b>", android.text.Html.FROM_HTML_MODE_LEGACY)
-            } else {
-                // Resting state
-                tvPredictions.text = "..."
-            }
+            setRestingUI(isComposingEmpty = wordProbabilities.isNotEmpty())
             return
         }
         
         // 1. Slice lists: Standard mode now ALSO caps at 8 words
         val itemsToDraw = if (isRadialMenuOpen) {
             if (isPunctuationMode) {
-                if (radialPage == 0) punctuationsP1 else punctuationsP2
+                val start = radialPage * 8
+                val end = kotlin.math.min(start + 8, PUNCTUATIONS.size)
+                if (start < PUNCTUATIONS.size) PUNCTUATIONS.subList(start, end) else emptyList()
             } else {
                 val start = radialPage * 8
                 val end = kotlin.math.min(start + 8, currentPredictions.size)
@@ -948,13 +1079,18 @@ class OdinT9Service : InputMethodService() {
 
         // 3. Shortened Pagination: [1/3]
         if (isRadialMenuOpen) {
-            val maxPages = if (isPunctuationMode) 2 else kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
+            val maxPages = if (isPunctuationMode) {
+                kotlin.math.ceil(PUNCTUATIONS.size / 8.0).toInt()
+            } else {
+                kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
+            }
             if (maxPages > 1) {
                 display += "   <font color='#888888'><i>[${radialPage + 1}/$maxPages]</i></font>"
             }
         }
         
         tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
+
 
         // 4. THE CRASH FIX: Capture state and use Try/Catch Failsafes
         val capturedSelectedIndex = radialSelectedIndex
@@ -1055,25 +1191,20 @@ class OdinT9Service : InputMethodService() {
         return word
     }
 
-    private fun triggerHapticClick() {
-        if (!vibrateOnType || !vibrator.hasVibrator()) return
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Force exact milliseconds, and force MAXIMUM amplitude (255)
-            vibrator.vibrate(VibrationEffect.createOneShot(vibrateDuration, 255))
+    /**
+     * SINGLE SOURCE OF TRUTH FOR RESTING UI
+     * Displays the resting dots and the inconspicuous Mode Badge.
+     */
+    private fun setRestingUI(isComposingEmpty: Boolean = false) {
+        val modeBadge = if (currentMode == InputMode.T9) "[T9]" else "[ABC]"
+        val baseText = if (isComposingEmpty) {
+            "<b><font color='#A3FF00'>[...]</font></b>"
         } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(vibrateDuration)
+            "..."
         }
-    }
-
-    private fun triggerHardHapticClick() {
-        if (!vibrateOnType || !vibrator.hasVibrator()) return
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            vibrator.vibrate(android.os.VibrationEffect.createOneShot(vibrateDuration + 25L, 255))
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(vibrateDuration + 25L)
-        }
+        
+        // Use a dark, inconspicuous grey for the badge, tucked away with spacing
+        val display = "$baseText &nbsp;&nbsp;&nbsp; <font color='#444444'><small>$modeBadge</small></font>"
+        tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
     }
 }

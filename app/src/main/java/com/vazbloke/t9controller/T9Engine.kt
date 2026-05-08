@@ -41,6 +41,8 @@ class T9Engine {
     private val root = TrieNode()
     private var allWordsList = mutableListOf<String>()
 
+    private var customWordsList = mutableListOf<String>()
+
     fun loadDictionary(context: Context) {
         // 1. Load Base Dictionary
         try {
@@ -72,7 +74,7 @@ class T9Engine {
                         // FIX: Allow apostrophes here too
                         if (word.isNotEmpty() && word.all { it in 'a'..'z' || it == '\'' }) {
                             insertWord(word, 999999)
-                            allWordsList.add(word)
+                            customWordsList.add(word)
                         }
                     }
                 }
@@ -230,13 +232,6 @@ class T9Engine {
     fun getCharsForDigit(digit: Char): List<Char> = digitToChars[digit] ?: emptyList()
     fun getAllWords(): List<String> = allWordsList
 
-    private fun getCustomDictFile(): File {
-        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val t9Dir = File(downloadsDir, "T9Controller")
-        if (!t9Dir.exists()) t9Dir.mkdirs()
-        return File(t9Dir, "customdictionary.csv")
-    }
-
     fun addCustomWord(word: String) {
         insertWord(word.lowercase(), 999999)
         try { getCustomDictFile().appendText("${word.lowercase()},999999\n") } catch (e: Exception) {}
@@ -245,5 +240,45 @@ class T9Engine {
     // Change this from private to public in T9Engine.kt
     fun wordToSequence(word: String): String {
         return word.map { charToDigit[it] ?: '0' }.joinToString("")
+    }
+
+    // Find getCustomDictFile() and make it public so our Activity can use it:
+    fun getCustomDictFile(): File {
+        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val t9Dir = File(downloadsDir, "T9Controller")
+        if (!t9Dir.exists()) t9Dir.mkdirs()
+        return File(t9Dir, "customdictionary.csv")
+    }
+
+    // Add these new management functions:
+    fun getAllCustomWords(): List<String> {
+        val words = mutableListOf<String>()
+        try {
+            val file = getCustomDictFile()
+            if (file.exists()) {
+                file.forEachLine { line ->
+                    val parts = line.split("\t", ",")
+                    if (parts.isNotEmpty() && parts[0].isNotBlank()) words.add(parts[0].trim())
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+        return words.sorted()
+    }
+
+    fun overwriteCustomDictionary(newWords: List<String>) {
+        try {
+            val file = getCustomDictFile()
+            file.writeText("") // Clear file
+            for (word in newWords) {
+                file.appendText("${word.lowercase()},999999\n")
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+    }
+
+    fun fullReload(context: Context) {
+        // Wipe the trie and lists clean
+        root.children.clear()
+        allWordsList.clear()
+        loadDictionary(context)
     }
 }

@@ -20,6 +20,8 @@ object DefaultBindings {
         "key_word_left" to -1,
         "key_word_right" to -1,
         "key_cycle_fwd" to -1,
-        "key_cycle_back" to -1
+        "key_cycle_back" to -1,
+        "key_toggle_mode" to KeyEvent.KEYCODE_BUTTON_L2,
+        "key_add_to_dict" to KeyEvent.KEYCODE_BUTTON_THUMBR
     )
 }

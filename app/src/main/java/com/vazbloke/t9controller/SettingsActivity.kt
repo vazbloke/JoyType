@@ -138,7 +138,7 @@ class SettingsActivity : AppCompatActivity() {
             "key_accept", "key_cycle_fwd", "key_cycle_back", "key_cycle_prev", 
             "key_backspace_word", "key_backspace_stroke", 
             "key_add_space", "key_clear_text", "key_enter", 
-            "key_undo", "key_close", "key_open_settings", "key_word_left", "key_word_right"
+            "key_undo", "key_close", "key_open_settings", "key_word_left", "key_word_right", "key_toggle_mode", "key_add_to_dict"
         )
 
         val modKeys = listOf("key_mod_1", "key_mod_2", "key_mod_3")
@@ -148,7 +148,13 @@ class SettingsActivity : AppCompatActivity() {
             setPreferencesFromResource(R.xml.preferences, rootKey)
             prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
 
-                        // Added key_mod_1 and key_mod_2 to the listenable list!
+            val dictPref = findPreference<Preference>("manage_custom_dict")
+            dictPref?.setOnPreferenceClickListener {
+                startActivity(android.content.Intent(requireContext(), CustomDictionaryActivity::class.java))
+                true
+            }
+
+            // Added key_mod_1 and key_mod_2 to the listenable list!
             val bindableKeys = listOf(
                 "key_mod_1", "key_mod_2", 
                 "key_accept", "key_cycle_prev", "key_backspace_word",

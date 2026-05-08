@@ -32,6 +32,7 @@ class OdinT9Service : InputMethodService() {
     private var isTriggerHeld = false
     private val currentStrokePath = mutableListOf<PointF>()
     private val wordProbabilities = mutableListOf<Map<Char, Float>>()
+    private val lastAcceptedProbabilities = mutableListOf<Map<Char, Float>>() // NEW: Memory State
     private var vibratedThisStroke = false // NEW: Tracks the flick attack!
     
     // --- Radial UI State ---
@@ -119,6 +120,16 @@ class OdinT9Service : InputMethodService() {
         }
     }
 
+    // --- Pair Input State ---
+    private var pairInputMode = false
+    private var peakPt: PointF? = null
+    private var peakMag = 0f
+    private var inValley = false
+    private var lastMag = 0f
+    private var isDescending = false
+    private var lastDetectionType = ""
+    private val registeredDebugPeaks = mutableListOf<PointF>()
+
     // --- Cursor Glide State ---
     private val cursorHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var isCursorGliding = false
@@ -171,14 +182,16 @@ class OdinT9Service : InputMethodService() {
 
         repeatDelay = prefs.getInt("key_repeat_delay", 600).toLong()
 
+        pairInputMode = prefs.getBoolean("pair_input_mode", false)
+
         if (::swipeDebugView.isInitialized) {
             swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         }
 
-        // Load Modifiers
-        m1KeyCode = prefs.getInt("key_mod_1", KeyEvent.KEYCODE_BUTTON_C)
-        m2KeyCode = prefs.getInt("key_mod_2", KeyEvent.KEYCODE_BUTTON_Z)
-        m3KeyCode = prefs.getInt("key_mod_3", -1)
+        // Load Modifiers using SSOT
+        m1KeyCode = prefs.getInt("key_mod_1", DefaultBindings.MAP["key_mod_1"]!!)
+        m2KeyCode = prefs.getInt("key_mod_2", DefaultBindings.MAP["key_mod_2"]!!)
+        m3KeyCode = prefs.getInt("key_mod_3", DefaultBindings.MAP["key_mod_3"]!!)
 
         val radialStr = prefs.getString("joy_radial_mod", "NONE")
         radialModifier = when(radialStr) {
@@ -199,31 +212,36 @@ class OdinT9Service : InputMethodService() {
         keyBindings.clear()
 
         // Helper function to pair keys with their dropdown modifiers
-        fun bind(action: Action, keyPref: String, modPref: String, defaultKey: Int) {
+        fun bind(action: Action, keyPref: String, modPref: String) {
+            val defaultKey = DefaultBindings.MAP[keyPref] ?: -1
             val keyCode = prefs.getInt(keyPref, defaultKey)
             val modString = prefs.getString(modPref, "NONE")
             val mod = when (modString) {
                 "M1" -> ModifierKey.M1
                 "M2" -> ModifierKey.M2
+                "M3" -> ModifierKey.M3
                 else -> ModifierKey.NONE
             }
-            // Only bind if the key is actually set to something valid
             if (keyCode != -1) {
                 keyBindings[KeyCombo(keyCode, mod)] = action
             }
         }
 
         // Bind all actions with default values
-        bind(Action.ACCEPT, "key_accept", "mod_accept", KeyEvent.KEYCODE_BUTTON_R1)
-        bind(Action.CYCLE_PREV, "key_cycle_prev", "mod_cycle_prev", KeyEvent.KEYCODE_BUTTON_L1)
-        bind(Action.BACKSPACE_WORD, "key_backspace_word", "mod_backspace_word", KeyEvent.KEYCODE_BUTTON_Y)
-        bind(Action.BACKSPACE_STROKE, "key_backspace_stroke", "mod_backspace_stroke", KeyEvent.KEYCODE_BUTTON_B)
-        bind(Action.ADD_SPACE, "key_add_space", "mod_add_space", KeyEvent.KEYCODE_BUTTON_A)
-        bind(Action.CLEAR_TEXT, "key_clear_text", "mod_clear_text", -1)
-        bind(Action.ENTER, "key_enter", "mod_enter", KeyEvent.KEYCODE_BUTTON_R2)
-        bind(Action.UNDO, "key_undo", "mod_undo", KeyEvent.KEYCODE_BUTTON_THUMBL)
-        bind(Action.CLOSE_KEYBOARD, "key_close", "mod_close", KeyEvent.KEYCODE_BUTTON_SELECT)
-        bind(Action.OPEN_SETTINGS, "key_open_settings", "mod_open_settings", KeyEvent.KEYCODE_BUTTON_START)
+        bind(Action.ACCEPT, "key_accept", "mod_accept")
+        bind(Action.CYCLE_PREV, "key_cycle_prev", "mod_cycle_prev")
+        bind(Action.BACKSPACE_WORD, "key_backspace_word", "mod_backspace_word")
+        bind(Action.BACKSPACE_STROKE, "key_backspace_stroke", "mod_backspace_stroke")
+        bind(Action.ADD_SPACE, "key_add_space", "mod_add_space")
+        bind(Action.CLEAR_TEXT, "key_clear_text", "mod_clear_text")
+        bind(Action.ENTER, "key_enter", "mod_enter")
+        bind(Action.UNDO, "key_undo", "mod_undo")
+        bind(Action.CLOSE_KEYBOARD, "key_close", "mod_close")
+        bind(Action.OPEN_SETTINGS, "key_open_settings", "mod_open_settings")
+        bind(Action.CURSOR_WORD_LEFT, "key_word_left", "mod_word_left")
+        bind(Action.CURSOR_WORD_RIGHT, "key_word_right", "mod_word_right")
+        bind(Action.CYCLE_FWD, "key_cycle_fwd", "mod_cycle_fwd")
+        bind(Action.CYCLE_BACK, "key_cycle_back", "mod_cycle_back")
     }
 
     override fun onCreateInputView(): View {
@@ -376,32 +394,99 @@ class OdinT9Service : InputMethodService() {
         return super.onGenericMotionEvent(event)
     }
 
-private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
+    private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         val mapped = mapCircleToSquare(rawX, rawY)
 
-        // NEW: Vibrate on the ATTACK of the flick (surpassing 50% distance)
+        // UX Polish: Clear the debug canvas ONLY when a brand new physical flick begins
+        if (mag > 0.1f && currentStrokePath.isEmpty()) {
+            registeredDebugPeaks.clear()
+            lastDetectionType = ""
+        }
+
         if (mag > 0.5f && !vibratedThisStroke) {
             vibratedThisStroke = true
             triggerHapticClick() 
         }
 
-        if (mag == 0.0f) {
-            vibratedThisStroke = false // NEW: Reset the tracker when stick returns to center
+        // --- PAIR INPUT MODE (Dual-Heuristic Detection) ---
+        if (pairInputMode && currentStrokePath.isNotEmpty()) {
+            
+            if (peakPt == null || mag > peakMag) {
+                peakPt = PointF(mapped.x, mapped.y)
+                peakMag = mag
+            }
+            
+            var triggeredPair = false
 
-            // SNAPBACK: Find the sharpest point of the flick and save the letter
+            // Heuristic A: The Diagonal Slice
+            if (mag < peakMag - 0.25f) { 
+                inValley = true 
+            } else if (inValley && mag > lastMag + 0.05f && mag > 0.3f) {
+                triggeredPair = true 
+                lastDetectionType = "Diagonal-slice" // LOG IT!
+            }
+
+            // Heuristic B: The Rim-Roll
+            if (!triggeredPair && peakPt != null && peakMag > 0.5f) {
+                val distFromPeak = getDistance(peakPt!!, mapped.x, mapped.y)
+                if (distFromPeak > 0.7f && mag > 0.4f) {
+                    triggeredPair = true 
+                    lastDetectionType = "Rim-roll" // LOG IT!
+                }
+            }
+
+            if (triggeredPair && peakPt != null) {
+                wordProbabilities.add(generateProbabilityMap(peakPt!!))
+                registeredDebugPeaks.add(PointF(peakPt!!.x, peakPt!!.y)) // SAVE THE PEAK!
+                updateLivePredictions()
+                
+                vibratedThisStroke = false 
+                triggerHapticClick()
+                
+                currentStrokePath.clear()
+                currentStrokePath.add(PointF(mapped.x, mapped.y))
+                peakPt = null
+                peakMag = 0f
+                inValley = false
+                lastMag = mag
+                
+                // Update debug view immediately to show the glowing point mid-flick
+                swipeDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
+                return
+            }
+        }
+        
+        lastMag = mag
+        // ----------------------------------------------
+
+        // Notice we changed this from 0.0f to 0.1f to enforce the hardware deadzone safety!
+        if (mag < 0.1f) {
+            vibratedThisStroke = false 
+            peakPt = null
+            peakMag = 0f
+            inValley = false
+            lastMag = 0f
+
             if (currentStrokePath.isNotEmpty()) {
-                val maxPt = currentStrokePath.maxByOrNull { kotlin.math.sqrt(it.x * it.x + it.y * it.y) }
-                if (maxPt != null && kotlin.math.sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
+                val maxPt = currentStrokePath.maxByOrNull { sqrt(it.x * it.x + it.y * it.y) }
+                if (maxPt != null && sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
                     wordProbabilities.add(generateProbabilityMap(maxPt))
+                    registeredDebugPeaks.add(maxPt) // SAVE THE PEAK!
+                    
+                    // Only label it a normal flick if pair input didn't already trigger something else
+                    if (lastDetectionType.isEmpty()) lastDetectionType = "Normal flick" 
                 }
                 currentStrokePath.clear()
                 updateLivePredictions()
+                
+                // Update the debug view one last time so the final state persists on screen
+                swipeDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
             }
             return
         }
 
         currentStrokePath.add(PointF(mapped.x, mapped.y))
-        swipeDebugView.updateJoyT9Debug(currentStrokePath, emptyList(), wordProbabilities)
+        swipeDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
     }
 
     private fun updateLivePredictions() {
@@ -578,6 +663,11 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                         lastAcceptTime = now
                     }
                 }
+
+                // Save the exact probability state before resetting!
+                lastAcceptedProbabilities.clear()
+                lastAcceptedProbabilities.addAll(wordProbabilities)
+
                 resetState()
             }
             Action.BACKSPACE_WORD -> {
@@ -615,45 +705,59 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                 val text = extracted.text.toString()
                 val cursor = extracted.selectionStart
 
-                // 1. Expand outwards from the cursor to find the word boundaries
-                var start = cursor
+                // 1. Skip any trailing spaces immediately before the cursor
+                var searchCursor = cursor
+                while (searchCursor > 0 && text[searchCursor - 1].isWhitespace()) {
+                    searchCursor--
+                }
+
+                // 2. Expand outwards from the true end of the word to find the start
+                var start = searchCursor
                 while (start > 0 && text[start - 1].isLetter()) start--
                 
-                var end = cursor
+                var end = searchCursor
                 while (end < text.length && text[end].isLetter()) end++
 
                 if (start < end) {
                     val targetWord = text.substring(start, end)
 
-                    // 2. Select the whole word and delete it
-                    ic.setSelection(start, end)
+                    // 3. Delete from the start of the word ALL THE WAY to the original cursor 
+                    // (This cleanly deletes the word AND the trailing spaces!)
+                    ic.setSelection(start, cursor)
                     ic.commitText("", 1)
 
-                    // 3. Clean up any trailing space that might have been left behind
-                    val textAfterDelete = ic.getTextAfterCursor(1, 0)?.toString() ?: ""
-                    if (textAfterDelete == " ") {
-                        ic.deleteSurroundingText(0, 1)
-                    }
-
-                    // 4. Reverse-engineer the T9 sequence
-                    val seq = t9Engine.wordToSequence(targetWord)
-                    
-                    // 5. Reconstruct the active composing state
+                    // 4. Reconstruct the active composing state
                     wordProbabilities.clear()
                     currentStrokePath.clear()
-                    for (digit in seq) {
-                        // Feed the engine 100% confidence for each digit
-                        wordProbabilities.add(mapOf(digit to 1.0f))
+                    
+                    // NEW: Authenticate the saved state!
+                    var restoredState = false
+                    if (lastAcceptedProbabilities.size == targetWord.length) {
+                        // Dry-run the saved probabilities through the engine
+                        val testPredictions = t9Engine.getProbabilisticPredictions(lastAcceptedProbabilities)
+                        if (testPredictions.any { it.equals(targetWord, ignoreCase = true) }) {
+                            // Validated! Restore the rich state.
+                            wordProbabilities.addAll(lastAcceptedProbabilities)
+                            restoredState = true
+                        }
+                    }
+                    
+                    // Fallback: If validation failed, 100% reverse-engineer it
+                    if (!restoredState) {
+                        val seq = t9Engine.wordToSequence(targetWord)
+                        for (digit in seq) {
+                            // Feed the engine 100% confidence for each digit
+                            wordProbabilities.add(mapOf(digit to 1.0f))
+                        }
                     }
                     
                     // Generate the predictions
                     currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
-                    
                     // Try to pre-select the exact word they just pulled back
                     val foundIndex = currentPredictions.indexOfFirst { it.equals(targetWord, ignoreCase = true) }
                     predictionIndex = if (foundIndex != -1) foundIndex else 0
                     
-                    // Ensure the radial menu is closed initially so they see the standard prediction bar
+                    // Ensure the radial menu is closed initially so they see the standard prediction bar                    
                     isRadialMenuOpen = false 
                     updateUI()
                 }
@@ -789,6 +893,16 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         vibratedThisStroke = false
         isPeggedAtStart = false
         isPeggedAtEnd = false
+        lastMag = 0f
+        isDescending = false
+
+        // NEW: Reset Pair Input State!
+        peakPt = null
+        peakMag = 0f
+        inValley = false
+        lastMag = 0f
+        lastDetectionType = ""
+        registeredDebugPeaks.clear()
     }
 
     private fun updateUI() {

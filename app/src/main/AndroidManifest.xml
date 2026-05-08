@@ -8,7 +8,7 @@
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="Odin T9 Keyboard"
+        android:label="JoyType"
         android:theme="@style/Theme.AppCompat.Light">
         <activity android:name=".MainActivity" />
 
@@ -29,7 +29,7 @@
             android:name="com.vazbloke.joytype.SettingsActivity"
             android:exported="true"
             android:theme="@style/Theme.AppCompat.DayNight"
-            android:label="Odin T9 Settings" />
+            android:label="JoyType Settings" />
         
         <activity android:name="com.vazbloke.joytype.CustomDictionaryActivity" android:theme="@style/Theme.AppCompat.NoActionBar"/>
     </application>

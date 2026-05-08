@@ -245,7 +245,7 @@ class T9Engine {
     // Find getCustomDictFile() and make it public so our Activity can use it:
     fun getCustomDictFile(): File {
         val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val t9Dir = File(downloadsDir, "T9Controller")
+        val t9Dir = File(downloadsDir, "JoyType")
         if (!t9Dir.exists()) t9Dir.mkdirs()
         return File(t9Dir, "customdictionary.csv")
     }

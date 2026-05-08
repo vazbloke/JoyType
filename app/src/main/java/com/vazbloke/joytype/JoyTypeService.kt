@@ -79,7 +79,7 @@ class JoyTypeService : InputMethodService() {
     // --- Live Reload Receiver ---
     private val dictReloadReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
-            if (intent?.action == "com.vazbloke.t9controller.RELOAD_DICT") {
+            if (intent?.action == "com.vazbloke.joytype.RELOAD_DICT") {
                 t9Engine.fullReload(this@JoyTypeService)
                 android.widget.Toast.makeText(this@JoyTypeService, "Custom Dictionary Reloaded", android.widget.Toast.LENGTH_SHORT).show()
             }
@@ -132,7 +132,10 @@ class JoyTypeService : InputMethodService() {
         override fun run() {
             repeatingAction?.let {
                 executeAction(it, isRepeat = true) // Flag for reduced vibrate
-                repeatHandler.postDelayed(this, 100L) 
+                // Increased the loop delay. 
+                // This gives the physical weight inside the motor enough time to 
+                // completely stop spinning between deletions, making it feel much lighter!
+                repeatHandler.postDelayed(this, 140L) 
             }
         }
     }
@@ -196,7 +199,7 @@ class JoyTypeService : InputMethodService() {
         loadSettings()
 
         // Register the receiver
-        val filter = android.content.IntentFilter("com.vazbloke.t9controller.RELOAD_DICT")
+        val filter = android.content.IntentFilter("com.vazbloke.joytype.RELOAD_DICT")
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(dictReloadReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -221,8 +224,13 @@ class JoyTypeService : InputMethodService() {
         visualDebug = prefs.getBoolean("visual_debug_mode", true)
 
         // Inside loadSettings():
-        haptics.isEnabled = prefs.getBoolean("vibrate_on_type", true)
-        haptics.customDuration = prefs.getInt("vibrate_duration", 15).toLong()
+        val profileString = prefs.getString("haptic_profile", "MEDIUM") ?: "MEDIUM"
+        haptics.currentProfile = try {
+            HapticProfile.valueOf(profileString)
+        } catch (e: IllegalArgumentException) {
+            // Failsafe in case of weird data
+            HapticProfile.MEDIUM 
+        }
 
         repeatDelay = prefs.getInt("key_repeat_delay", 600).toLong()
 
@@ -590,13 +598,6 @@ class JoyTypeService : InputMethodService() {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
 
         val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
-        
-        // D-PAD TEXT CURSOR PASSTHROUGH
-        if (isDPad) {
-            // THE FIX: Punch the key event directly through to the underlying app
-            sendDownUpKeyEvents(keyCode)
-            return true
-        }
 
         // Eat held buttons (to prevent machine-gunning inputs), EXCEPT for the D-pad!
         if (event.repeatCount > 0 && !isDPad) return true
@@ -647,10 +648,28 @@ class JoyTypeService : InputMethodService() {
             return true
         }
 
-        // DPAD PASSTHROUGH
-        if (keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)) {
-            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-            return true
+        // D-PAD TEXT CURSOR PASSTHROUGH
+        if (isDPad) {
+            val ic = currentInputConnection ?: return true
+            
+            // Bypass hardware event dispatch entirely for Left/Right. Use pure math!
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
+                var cursorIndex = extracted?.selectionStart ?: 0
+                val textLen = extracted?.text?.length ?: 0
+
+                if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && cursorIndex > 0) cursorIndex--
+                if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && cursorIndex < textLen) cursorIndex++
+
+                ic.beginBatchEdit()
+                ic.setSelection(cursorIndex, cursorIndex)
+                ic.endBatchEdit()
+            } else {
+                // For Up/Down, we still have to rely on Android's native text navigation, 
+                // but we wrap it in a fallback flag to force it through.
+                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            }
+            return true // We ate the event and handled it mathematically.
         }
 
         return super.onKeyDown(keyCode, event)
@@ -661,14 +680,6 @@ class JoyTypeService : InputMethodService() {
         // Cancel any repeating action when ANY key is lifted
         repeatingAction = null
         repeatHandler.removeCallbacks(repeatRunnable)
-        
-        // D-PAD TEXT CURSOR PASSTHROUGH
-        val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
-        if (isDPad) {
-            // Because sendDownUpKeyEvents() fires BOTH the down and up action instantly,
-            // we simply swallow the physical hardware 'up' event so we don't double-fire!
-            return true
-        }
 
         // Track Modifier Releases
         if (keyCode == m1KeyCode) isM1Held = false
@@ -718,9 +729,12 @@ class JoyTypeService : InputMethodService() {
         }
 
         // D-PAD TEXT CURSOR PASSTHROUGH
-        if (keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)) {
-            // Returning false refuses the input, forcing Android to natively pass it to the text box!
-            return false 
+        val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
+        if (isDPad) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            }
+            return true
         }
 
         return super.onKeyUp(keyCode, event)

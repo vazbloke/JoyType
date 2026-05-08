@@ -1,6 +1,6 @@
 <resources>
 
-    <string name="ime_name">Controller Type</string>
+    <string name="ime_name">JoyType</string>
     <string name="ime_language">English (United States)</string>
     
     <string-array name="completion_mode_entries">

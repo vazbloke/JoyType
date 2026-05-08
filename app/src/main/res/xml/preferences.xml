@@ -61,7 +61,7 @@
         <com.vazbloke.joytype.InlineSpinnerPreference
             android:key="joy_radial_mod"
             android:title="Radial Prediction Selection"
-            app:summary="Select the modifier required to open the radial word/punctuation menu"
+            app:summary="Select the modifier required to open the radial word/special character menu"
             android:defaultValue="M1" />
             
         <com.vazbloke.joytype.InlineSpinnerPreference

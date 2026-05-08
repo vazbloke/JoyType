@@ -99,7 +99,7 @@ class CustomDictionaryActivity : AppCompatActivity() {
         adapter.notifyDataSetChanged()
         
         // Force the live keyboard service to reload its memory!
-        val intent = android.content.Intent("com.vazbloke.t9controller.RELOAD_DICT")
+        val intent = android.content.Intent("com.vazbloke.joytype.RELOAD_DICT")
         sendBroadcast(intent)
     }
 

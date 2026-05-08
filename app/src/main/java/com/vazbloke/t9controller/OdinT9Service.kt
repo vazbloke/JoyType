@@ -105,6 +105,20 @@ class OdinT9Service : InputMethodService() {
     private var isPeggedAtStart = false
     private var isPeggedAtEnd = false
 
+    // --- Key Repeat State ---
+    private var repeatDelay = 600L
+    private val repeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var repeatingAction: Action? = null
+
+    private val repeatRunnable = object : Runnable {
+        override fun run() {
+            repeatingAction?.let {
+                executeAction(it)
+                repeatHandler.postDelayed(this, 50L) // 50ms firing rate once the delay is passed
+            }
+        }
+    }
+
     // --- Cursor Glide State ---
     private val cursorHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var isCursorGliding = false
@@ -154,6 +168,8 @@ class OdinT9Service : InputMethodService() {
 
         vibrateOnType = prefs.getBoolean("vibrate_on_type", true)
         vibrateDuration = prefs.getInt("vibrate_duration", 15).toLong()
+
+        repeatDelay = prefs.getInt("key_repeat_delay", 600).toLong()
 
         if (::swipeDebugView.isInitialized) {
             swipeDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
@@ -450,6 +466,13 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
         
         if (action != null) {
             executeAction(action)
+
+            // Start the repeat timer (Ignore Action.NONE and Actions we don't want repeating)
+            if (action != Action.NONE && action != Action.CLOSE_KEYBOARD && action != Action.OPEN_SETTINGS) {
+                repeatingAction = action
+                repeatHandler.postDelayed(repeatRunnable, repeatDelay)
+            }
+
             return true
         }
 
@@ -463,6 +486,10 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+
+        // Cancel any repeating action when ANY key is lifted
+        repeatingAction = null
+        repeatHandler.removeCallbacks(repeatRunnable)
         
         // D-PAD TEXT CURSOR PASSTHROUGH
         val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
@@ -580,26 +607,38 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
             Action.CYCLE_PREV -> {
                 // If the user is currently typing a word, ignore this action so we don't overwrite their current thread
                 if (wordProbabilities.isNotEmpty()) return 
-                
+
                 saveUndoSnapshot()
                 triggerHapticClick()
+
+                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0) ?: return
+                val text = extracted.text.toString()
+                val cursor = extracted.selectionStart
+
+                // 1. Expand outwards from the cursor to find the word boundaries
+                var start = cursor
+                while (start > 0 && text[start - 1].isLetter()) start--
                 
-                val textBefore = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
-                
-                // Match the last actual word (letters) and any trailing spaces after it
-                val match = Regex("([a-zA-Z]+)(\\s*)$").find(textBefore)
-                
-                if (match != null) {
-                    val lastWord = match.groupValues[1]
-                    val trailingSpaces = match.groupValues[2]
+                var end = cursor
+                while (end < text.length && text[end].isLetter()) end++
+
+                if (start < end) {
+                    val targetWord = text.substring(start, end)
+
+                    // 2. Select the whole word and delete it
+                    ic.setSelection(start, end)
+                    ic.commitText("", 1)
+
+                    // 3. Clean up any trailing space that might have been left behind
+                    val textAfterDelete = ic.getTextAfterCursor(1, 0)?.toString() ?: ""
+                    if (textAfterDelete == " ") {
+                        ic.deleteSurroundingText(0, 1)
+                    }
+
+                    // 4. Reverse-engineer the T9 sequence
+                    val seq = t9Engine.wordToSequence(targetWord)
                     
-                    // 1. Delete the word and its spaces from the text box
-                    ic.deleteSurroundingText(lastWord.length + trailingSpaces.length, 0)
-                    
-                    // 2. Reverse-engineer the T9 sequence (e.g., "hello" -> "43556")
-                    val seq = t9Engine.wordToSequence(lastWord)
-                    
-                    // 3. Reconstruct the active composing state!
+                    // 5. Reconstruct the active composing state
                     wordProbabilities.clear()
                     currentStrokePath.clear()
                     for (digit in seq) {
@@ -607,16 +646,15 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                         wordProbabilities.add(mapOf(digit to 1.0f))
                     }
                     
-                    // 4. Generate the predictions
+                    // Generate the predictions
                     currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
                     
-                    // 5. Try to pre-select the exact word they just pulled back
-                    val foundIndex = currentPredictions.indexOfFirst { it.equals(lastWord, ignoreCase = true) }
+                    // Try to pre-select the exact word they just pulled back
+                    val foundIndex = currentPredictions.indexOfFirst { it.equals(targetWord, ignoreCase = true) }
                     predictionIndex = if (foundIndex != -1) foundIndex else 0
                     
                     // Ensure the radial menu is closed initially so they see the standard prediction bar
                     isRadialMenuOpen = false 
-                    
                     updateUI()
                 }
             }

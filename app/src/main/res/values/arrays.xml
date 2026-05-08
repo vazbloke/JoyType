@@ -1,0 +1,25 @@
+<resources>
+    <string-array name="mod_entries">
+        <item>None</item>
+        <item>Modifier 1 (M1)</item>
+        <item>Modifier 2 (M2)</item>
+        <item>Modifier 3 (M3)</item>
+    </string-array>
+    <string-array name="mod_values">
+        <item>NONE</item>
+        <item>M1</item>
+        <item>M2</item>
+        <item>M3</item>
+    </string-array>
+
+    <string-array name="mod_entries_strict">
+        <item>Modifier 1 (M1)</item>
+        <item>Modifier 2 (M2)</item>
+        <item>Modifier 3 (M3)</item>
+    </string-array>
+    <string-array name="mod_values_strict">
+        <item>M1</item>
+        <item>M2</item>
+        <item>M3</item>
+    </string-array>
+</resources>

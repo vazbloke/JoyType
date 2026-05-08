@@ -1,0 +1,35 @@
+<resources>
+
+    <string name="ime_name">Controller Type</string>
+    <string name="ime_language">English (United States)</string>
+    
+    <string-array name="completion_mode_entries">
+        <item>Hold Trigger while swiping</item>
+        <item>Press Trigger after swiping</item>
+    </string-array>
+    <string-array name="completion_mode_values">
+        <item>hold_to_swipe</item>
+        <item>press_after</item>
+    </string-array>
+
+    <string-array name="gamepad_button_entries">
+        <item>Button A</item>
+        <item>Button B</item>
+        <item>Button X</item>
+        <item>Button Y</item>
+        <item>L1 (Bumper)</item>
+        <item>R1 (Bumper)</item>
+        <item>L2 (Trigger)</item>
+        <item>R2 (Trigger)</item>
+        <item>D-Pad Up</item>
+        <item>D-Pad Down</item>
+        <item>D-Pad Left</item>
+        <item>D-Pad Right</item>
+        <item>Select / Back</item>
+        <item>Start</item>
+        <item>Disabled (None)</item>
+    </string-array>
+
+    <string-array name="gamepad_button_values">
+        <item>96</item>  <item>97</item>  <item>99</item>  <item>100</item> <item>102</item> <item>103</item> <item>104</item> <item>105</item> <item>19</item>  <item>20</item>  <item>21</item>  <item>22</item>  <item>109</item> <item>108</item> <item>-1</item>  </string-array>
+</resources>

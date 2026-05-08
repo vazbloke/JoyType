@@ -199,7 +199,7 @@ class OdinT9Service : InputMethodService() {
 
         // Bind all actions with default values
         bind(Action.ACCEPT, "key_accept", "mod_accept", KeyEvent.KEYCODE_BUTTON_R1)
-        bind(Action.CYCLE_PREV, "key_cycle_prev", "mod_cycle_prev", KeyEvent.KEYCODE_BUTTON_X)
+        bind(Action.CYCLE_PREV, "key_cycle_prev", "mod_cycle_prev", KeyEvent.KEYCODE_BUTTON_L1)
         bind(Action.BACKSPACE_WORD, "key_backspace_word", "mod_backspace_word", KeyEvent.KEYCODE_BUTTON_Y)
         bind(Action.BACKSPACE_STROKE, "key_backspace_stroke", "mod_backspace_stroke", KeyEvent.KEYCODE_BUTTON_B)
         bind(Action.ADD_SPACE, "key_add_space", "mod_add_space", KeyEvent.KEYCODE_BUTTON_A)
@@ -578,19 +578,46 @@ private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
                 }
             }
             Action.CYCLE_PREV -> {
+                // If the user is currently typing a word, ignore this action so we don't overwrite their current thread
+                if (wordProbabilities.isNotEmpty()) return 
+                
                 saveUndoSnapshot()
+                triggerHapticClick()
+                
                 val textBefore = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
-                val lastWordMatch = Regex("([a-zA-Z]+)\\s*$").find(textBefore)
-                if (lastWordMatch != null) {
-                    val lastWord = lastWordMatch.groupValues[1]
+                
+                // Match the last actual word (letters) and any trailing spaces after it
+                val match = Regex("([a-zA-Z]+)(\\s*)$").find(textBefore)
+                
+                if (match != null) {
+                    val lastWord = match.groupValues[1]
+                    val trailingSpaces = match.groupValues[2]
+                    
+                    // 1. Delete the word and its spaces from the text box
+                    ic.deleteSurroundingText(lastWord.length + trailingSpaces.length, 0)
+                    
+                    // 2. Reverse-engineer the T9 sequence (e.g., "hello" -> "43556")
                     val seq = t9Engine.wordToSequence(lastWord)
-                    val preds = t9Engine.getPredictions(seq)
-                    if (preds.isNotEmpty()) {
-                        val currentIdx = preds.indexOf(lastWord)
-                        val nextWord = if (currentIdx == -1) preds[0] else preds[(currentIdx + 1) % preds.size]
-                        ic.deleteSurroundingText(lastWord.length, 0)
-                        ic.commitText(nextWord, 1)
+                    
+                    // 3. Reconstruct the active composing state!
+                    wordProbabilities.clear()
+                    currentStrokePath.clear()
+                    for (digit in seq) {
+                        // Feed the engine 100% confidence for each digit
+                        wordProbabilities.add(mapOf(digit to 1.0f))
                     }
+                    
+                    // 4. Generate the predictions
+                    currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
+                    
+                    // 5. Try to pre-select the exact word they just pulled back
+                    val foundIndex = currentPredictions.indexOfFirst { it.equals(lastWord, ignoreCase = true) }
+                    predictionIndex = if (foundIndex != -1) foundIndex else 0
+                    
+                    // Ensure the radial menu is closed initially so they see the standard prediction bar
+                    isRadialMenuOpen = false 
+                    
+                    updateUI()
                 }
             }
             Action.ADD_SPACE -> {

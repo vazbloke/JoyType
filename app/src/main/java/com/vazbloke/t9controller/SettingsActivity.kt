@@ -163,7 +163,7 @@ class SettingsActivity : AppCompatActivity() {
                 "key_cycle_fwd" to -1, // Unbound by default
                 "key_cycle_back" to -1, // Unbound by default
                 "key_accept" to KeyEvent.KEYCODE_BUTTON_R1,
-                "key_cycle_prev" to KeyEvent.KEYCODE_BUTTON_X,
+                "key_cycle_prev" to KeyEvent.KEYCODE_BUTTON_L1,
                 "key_backspace_word" to KeyEvent.KEYCODE_BUTTON_Y,
                 "key_backspace_stroke" to KeyEvent.KEYCODE_BUTTON_B,
                 "key_add_space" to KeyEvent.KEYCODE_BUTTON_A,

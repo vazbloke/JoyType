@@ -2,6 +2,7 @@ package com.vazbloke.joytype
 
 import android.content.Context
 import android.os.Environment
+import androidx.preference.PreferenceManager
 import java.io.BufferedReader
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -9,6 +10,8 @@ import java.io.File
 import java.io.InputStreamReader
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class TrieNode(
@@ -55,7 +58,7 @@ class T9Engine {
     }
 
     fun loadDictionary(context: Context) {
-        val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         val currentFingerprint = getCacheFingerprint(context)
         val savedFingerprint = prefs.getString("dict_cache_fingerprint", "")
         val binFile = File(context.cacheDir, "dictionary_cache.bin")
@@ -273,8 +276,6 @@ class T9Engine {
         return getProbabilisticPredictions(deterministicProbs)
     }
 
-    // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)
-
     fun getCharsForDigit(digit: Char): List<Char> = digitToChars[digit] ?: emptyList()
     fun getAllWords(): List<String> = allWordsList
 
@@ -323,14 +324,14 @@ class T9Engine {
     }
 
     fun fullReload(context: Context) {
-        val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         prefs.edit().remove("dict_cache_fingerprint").apply()
         
         val binFile = File(context.cacheDir, "dictionary_cache.bin")
         if (binFile.exists()) binFile.delete()
         
         // Load on a background thread so the UI doesn't hang!
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+        CoroutineScope(Dispatchers.IO).launch {
             loadDictionary(context)
         }
     }

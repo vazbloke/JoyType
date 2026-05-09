@@ -29,23 +29,17 @@
             android:key="visual_debug_mode"
             android:title="Visual Debug Mode"
             android:summary="Show the 9-segment grid and joystick trace line"
-            android:defaultValue="true" />
+            android:defaultValue="false" />
     </androidx.preference.PreferenceCategory>
 
     <androidx.preference.PreferenceCategory android:title="Haptics &amp; Feedback">
-        <androidx.preference.SwitchPreferenceCompat
-            android:key="vibrate_on_type"
-            android:title="Vibrate on Input"
-            android:summary="Provide haptic feedback on joystick flicks and button presses"
-            android:defaultValue="true" />
-
-        <SeekBarPreference
-            app:key="vibrate_duration"
-            app:title="Vibration Duration (ms)"
-            app:min="1"
-            android:max="100" 
-            app:defaultValue="25"
-            app:showSeekBarValue="true" />
+        <androidx.preference.DropDownPreference
+            android:key="haptic_profile"
+            android:title="Haptic Feedback Strength"
+            app:useSimpleSummaryProvider="true"
+            android:entries="@array/haptic_profile_entries"
+            android:entryValues="@array/haptic_profile_values"
+            android:defaultValue="MEDIUM" />
     </androidx.preference.PreferenceCategory>
 
     <androidx.preference.PreferenceCategory android:title="Modifier Keys">
@@ -87,6 +81,8 @@
         <com.vazbloke.joytype.KeyBindingPreference
             android:key="key_undo" android:title="Undo Last Operation" />
         <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_redo" android:title="Redo Undone Operation" />
+        <com.vazbloke.joytype.KeyBindingPreference
             android:key="key_cycle_fwd" android:title="Cycle Prediction Forward" />
         <com.vazbloke.joytype.KeyBindingPreference
             android:key="key_cycle_back" android:title="Cycle Prediction Backward" />
@@ -97,9 +93,13 @@
         <com.vazbloke.joytype.KeyBindingPreference
             android:key="key_add_to_dict" android:title="Add Word to Dictionary" />
         <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_toggle_highlight" android:title="Toggle Highlight Anchor" />
+        <com.vazbloke.joytype.KeyBindingPreference
             android:key="key_close" android:title="Close Keyboard" />
         <com.vazbloke.joytype.KeyBindingPreference
             android:key="key_open_settings" android:title="Open Settings" />
+        <com.vazbloke.joytype.KeyBindingPreference
+            android:key="key_cheat_mpkfa" android:title="Cheat: Claw God Mode (MPKFA)" />
     </PreferenceCategory>
 
     <androidx.preference.PreferenceCategory android:title="Experimental">

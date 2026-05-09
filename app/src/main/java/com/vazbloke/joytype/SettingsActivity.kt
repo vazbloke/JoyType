@@ -138,7 +138,7 @@ class SettingsActivity : AppCompatActivity() {
             "key_accept", "key_cycle_fwd", "key_cycle_back", "key_recompose", 
             "key_backspace_word", "key_backspace_stroke", 
             "key_add_space", "key_clear_text", "key_enter", 
-            "key_undo", "key_close", "key_open_settings", "key_word_left", "key_word_right", "key_toggle_mode", "key_add_to_dict"
+            "key_undo", "key_redo", "key_close", "key_open_settings", "key_word_left", "key_word_right", "key_toggle_mode", "key_add_to_dict", "key_toggle_highlight"
         )
 
         val modKeys = listOf("key_mod_1", "key_mod_2", "key_mod_3")
@@ -159,7 +159,7 @@ class SettingsActivity : AppCompatActivity() {
                 "key_mod_1", "key_mod_2", 
                 "key_accept", "key_recompose", "key_backspace_word",
                 "key_backspace_stroke", "key_add_space", "key_clear_text", "key_enter", 
-                "key_undo", "key_close", "key_open_settings"
+                "key_undo", "key_redo", "key_close", "key_open_settings"
             )
 
             for (key in allKeys) {

@@ -10,6 +10,10 @@ import android.view.View
 import android.view.inputmethod.ExtractedTextRequest
 import android.widget.TextView
 import androidx.preference.PreferenceManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.max
@@ -32,14 +36,10 @@ class JoyTypeService : InputMethodService() {
     private var isRadialMenuOpen = false
     private var isSpecialCharMode = false
     private var radialSelectedIndex = 0
-    private val radialKey = KeyEvent.KEYCODE_BUTTON_C // Your M1 Button
 
     // NEW: Pagination State
     private var radialPage = 0 
     private var radialLastOctant = -1
-    
-    private var lastPhysicalZone: Int = -1
-    private var virtualRadialIndex: Int = -1
     
     // Master Special character List (32 Symbols = 4 Pages)
     private val SPECIAL_CHARS = listOf(
@@ -54,6 +54,7 @@ class JoyTypeService : InputMethodService() {
     private var currentPredictions = listOf<String>()
     private var predictionIndex = 0
     private val undoStack = java.util.Stack<CharSequence>()
+    private val redoStack = java.util.Stack<CharSequence>()
 
     // --- New Features State ---
     private var autoSpace = true
@@ -97,9 +98,9 @@ class JoyTypeService : InputMethodService() {
 
     enum class Action {
         ACCEPT, RECOMPOSE, BACKSPACE_WORD, BACKSPACE_STROKE, 
-        ADD_SPACE, CLEAR_TEXT, UNDO, OPEN_SETTINGS, NONE, ENTER, 
+        ADD_SPACE, CLEAR_TEXT, UNDO, REDO, OPEN_SETTINGS, NONE, ENTER, 
         CLOSE_KEYBOARD, CURSOR_WORD_LEFT, CURSOR_WORD_RIGHT,
-        CYCLE_FWD, CYCLE_BACK, TOGGLE_MODE, ADD_TO_DICT
+        CYCLE_FWD, CYCLE_BACK, TOGGLE_MODE, ADD_TO_DICT, TOGGLE_HIGHLIGHT, CHEAT_MPKFA
     }
 
     enum class InputMode { T9, ABC } // NEW
@@ -143,6 +144,12 @@ class JoyTypeService : InputMethodService() {
         }
     }
 
+    // --- Selection & Utility State ---
+    private var isHighlighting = false
+    private var highlightAnchorIndex = -1
+    private val UTILITY_ACTIONS = listOf("Cancel", "Copy", "Paste", "Cut", "Select All", "Toggle Case")
+    private lateinit var tvSelectionBadge: TextView // Add to your UI variables
+
     // --- Pair Input State ---
     private var pairInputMode = false
     private var peakPt: PointF? = null
@@ -160,7 +167,7 @@ class JoyTypeService : InputMethodService() {
             
             val delay = 200L - (cursorMag * 160L).toLong()
             
-            if (kotlin.math.abs(cursorX) > kotlin.math.abs(cursorY)) {
+            if (abs(cursorX) > abs(cursorY)) {
                 // HORIZONTAL MOVEMENT: Use mathematically pure IMS selection
                 if (cursorX > 0) {
                     if (glideCursorIndex < glideTextLength) glideCursorIndex++
@@ -170,7 +177,15 @@ class JoyTypeService : InputMethodService() {
                 // Force the cursor to our exact calculated index, bypassing hardware key listeners!
                 // Fixed: Lock the text box state so Chrome can't hijack the cursor mid-move!
                 ic.beginBatchEdit()
-                ic.setSelection(glideCursorIndex, glideCursorIndex)
+
+                if (isHighlighting && highlightAnchorIndex != -1) {
+                    // Some apps silently reject backwards ranges. Always pass the smaller index first!
+                    // Drag the selection box
+                    ic.setSelection(highlightAnchorIndex, glideCursorIndex)
+                } else {
+                    ic.setSelection(glideCursorIndex, glideCursorIndex)
+                }
+
                 ic.endBatchEdit()
             } else {
                 // VERTICAL MOVEMENT: We still must use DPAD here. 
@@ -185,7 +200,7 @@ class JoyTypeService : InputMethodService() {
                 }
                 
                 // Re-sync our local tracker just in case the DPAD vertical move changed our index
-                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
+                val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
                 glideCursorIndex = extracted?.selectionStart ?: glideCursorIndex
             }
             
@@ -204,7 +219,7 @@ class JoyTypeService : InputMethodService() {
         // Register the receiver
         val filter = android.content.IntentFilter("com.vazbloke.joytype.RELOAD_DICT")
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(dictReloadReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(dictReloadReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(dictReloadReceiver, filter)
         }
@@ -231,7 +246,7 @@ class JoyTypeService : InputMethodService() {
         val profileString = prefs.getString("haptic_profile", "MEDIUM") ?: "MEDIUM"
         haptics.currentProfile = try {
             HapticProfile.valueOf(profileString)
-        } catch (e: IllegalArgumentException) {
+        } catch (_e: IllegalArgumentException) {
             // Failsafe in case of weird data
             HapticProfile.MEDIUM 
         }
@@ -245,9 +260,9 @@ class JoyTypeService : InputMethodService() {
         }
 
         // Load Modifiers using SSOT
-        m1KeyCode = prefs.getInt("key_mod_1", DefaultBindings.MAP["key_mod_1"]!!)
-        m2KeyCode = prefs.getInt("key_mod_2", DefaultBindings.MAP["key_mod_2"]!!)
-        m3KeyCode = prefs.getInt("key_mod_3", DefaultBindings.MAP["key_mod_3"]!!)
+        m1KeyCode = prefs.getInt("key_mod_1", (DefaultBindings.MAP["key_mod_1"] as? Int) ?: -1)
+        m2KeyCode = prefs.getInt("key_mod_2", (DefaultBindings.MAP["key_mod_2"] as? Int) ?: -1)
+        m3KeyCode = prefs.getInt("key_mod_3", (DefaultBindings.MAP["key_mod_3"] as? Int) ?: -1)
 
         val radialStr = prefs.getString("joy_radial_mod", "M1")
         radialModifier = when(radialStr) {
@@ -269,7 +284,7 @@ class JoyTypeService : InputMethodService() {
 
         // Helper function to pair keys with their dropdown modifiers
         fun bind(action: Action, keyPref: String, modPref: String) {
-            val defaultKey = DefaultBindings.MAP[keyPref] ?: -1
+            val defaultKey = (DefaultBindings.MAP[keyPref] as? Int) ?: -1
             val keyCode = prefs.getInt(keyPref, defaultKey)
             val modString = prefs.getString(modPref, "NONE")
             val mod = when (modString) {
@@ -292,6 +307,7 @@ class JoyTypeService : InputMethodService() {
         bind(Action.CLEAR_TEXT, "key_clear_text", "mod_clear_text")
         bind(Action.ENTER, "key_enter", "mod_enter")
         bind(Action.UNDO, "key_undo", "mod_undo")
+        bind(Action.REDO, "key_redo", "mod_redo")
         bind(Action.CLOSE_KEYBOARD, "key_close", "mod_close")
         bind(Action.OPEN_SETTINGS, "key_open_settings", "mod_open_settings")
         bind(Action.CURSOR_WORD_LEFT, "key_word_left", "mod_word_left")
@@ -300,18 +316,23 @@ class JoyTypeService : InputMethodService() {
         bind(Action.CYCLE_BACK, "key_cycle_back", "mod_cycle_back")
         bind(Action.TOGGLE_MODE, "key_toggle_mode", "mod_toggle_mode")
         bind(Action.ADD_TO_DICT, "key_add_to_dict", "mod_add_to_dict")
+        // # TODO: Why bind to none below?
+        bind(Action.TOGGLE_HIGHLIGHT, "key_toggle_highlight", "NONE") // Hardcode "NONE" since KeyBindingPreference handles the combo
+        bind(Action.CHEAT_MPKFA, "key_cheat_mpkfa", "mod_cheat_mpkfa")
     }
 
     override fun onCreateInputView(): View {
         val view = layoutInflater.inflate(R.layout.keyboard_view, null)
         tvPredictions = view.findViewById(R.id.tv_predictions)
         tvModeBadge = view.findViewById(R.id.tv_mode_badge)
+        tvSelectionBadge = view.findViewById(R.id.tv_selection_badge)
         tvPaginationBadge = view.findViewById(R.id.tv_pagination_badge)
 
         visualDebugView = view.findViewById(R.id.swipe_debug_view)
         
         // THE FIX: Hook up the scroll view so it doesn't crash!
         hsvPredictions = view.findViewById(R.id.hsv_predictions) 
+
         
         visualDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         setRestingUI()
@@ -348,7 +369,7 @@ class JoyTypeService : InputMethodService() {
             // --- RADIAL UI JOYSTICK INTERCEPT ---
             if (isRadialMenuOpen) {
                 if (mag > 0.3f) { 
-                    var angle = kotlin.math.atan2(y.toDouble(), x.toDouble()) 
+                    var angle = atan2(y.toDouble(), x.toDouble()) 
                     angle += Math.PI / 2.0 
                     if (angle < 0) angle += 2 * Math.PI
 
@@ -464,10 +485,22 @@ class JoyTypeService : InputMethodService() {
                     if (!isCursorGliding) {
                         isCursorGliding = true
 
-                        // Capture the exact state of the text box ONCE to start the math
-                        val extracted = currentInputConnection?.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
-                        glideCursorIndex = extracted?.selectionStart ?: 0
+                        // 1. Capture the exact state of the text box ONCE
+                        val extracted = currentInputConnection?.getExtractedText(ExtractedTextRequest(), 0)
+                        
+                        // 2. Explicitly define our boundary variables
+                        val currentSelectionStart = extracted?.selectionStart ?: 0
+                        val currentSelectionEnd = extracted?.selectionEnd ?: 0
                         glideTextLength = extracted?.text?.length ?: 0
+
+                        // 3. The Scroll Reset Fix: Find the moving head!
+                        if (isHighlighting && highlightAnchorIndex != -1) {
+                            // If the anchor is at the start, our moving head must be at the end (and vice versa)
+                            glideCursorIndex = if (highlightAnchorIndex == currentSelectionStart) currentSelectionEnd else currentSelectionStart
+                        } else {
+                            // Normal cursor: start exactly where the OS cursor currently is
+                            glideCursorIndex = currentSelectionStart
+                        }
 
                         cursorHandler.post(cursorGlideRunnable) // Start gliding!
                     }
@@ -476,17 +509,30 @@ class JoyTypeService : InputMethodService() {
                 }
                 return true
             } else {
-                isCursorGliding = false
+                // THE NEW RELEASE LOGIC
+                if (isCursorGliding) {
+                    isCursorGliding = false
+                    
+                    // If they released the stick right on the anchor (0 selection), cancel highlight mode safely
+                    if (isHighlighting && highlightAnchorIndex == glideCursorIndex) {
+                        isHighlighting = false
+                        highlightAnchorIndex = -1
+                        if (currentPredictions == UTILITY_ACTIONS) {
+                            currentPredictions = emptyList()
+                            updateUI()
+                        }
+                    }
+                }
             }
 
             // --- NORMAL T9 TYPING ---
-            handleJoyJoyMovement(x, y, mag)
+            handleStrokeInput(x, y, mag)
             return true
         }
         return super.onGenericMotionEvent(event)
     }
 
-    private fun handleJoyJoyMovement(rawX: Float, rawY: Float, mag: Float) {
+    private fun handleStrokeInput(rawX: Float, rawY: Float, mag: Float) {
         val mapped = mapCircleToSquare(rawX, rawY)
 
         // UX Polish: Clear the debug canvas ONLY when a brand new physical flick begins
@@ -564,8 +610,8 @@ class JoyTypeService : InputMethodService() {
             lastMag = 0f
 
             if (currentStrokePath.isNotEmpty()) {
-                val maxPt = currentStrokePath.maxByOrNull { kotlin.math.sqrt(it.x * it.x + it.y * it.y) }
-                if (maxPt != null && kotlin.math.sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
+                val maxPt = currentStrokePath.maxByOrNull { sqrt(it.x * it.x + it.y * it.y) }
+                if (maxPt != null && sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
                     
                     if (currentMode == InputMode.T9) {
                         // --- NORMAL PREDICTIVE MODE ---
@@ -677,7 +723,7 @@ class JoyTypeService : InputMethodService() {
             
             // Bypass hardware event dispatch entirely for Left/Right. Use pure math!
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
+                val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
                 var cursorIndex = extracted?.selectionStart ?: 0
                 val textLen = extracted?.text?.length ?: 0
 
@@ -741,7 +787,7 @@ class JoyTypeService : InputMethodService() {
                             }
                             
                             ic?.commitText(charToCommit, 1)
-                            
+
                             // Re-apply the space on the right side ONLY if autoSpace is on AND we are in T9 Mode!
                             if (autoSpace && currentMode == InputMode.T9) { 
                                 ic?.commitText(" ", 1)
@@ -758,7 +804,9 @@ class JoyTypeService : InputMethodService() {
                     val actualIndex = (radialPage * 8) + radialSelectedIndex
                     
                     if (actualIndex < currentPredictions.size) {
-                        if (currentMode == InputMode.T9) {
+                        if (currentPredictions == UTILITY_ACTIONS) {
+                            executeUtilityCommand(currentPredictions[actualIndex])
+                        } else if (currentMode == InputMode.T9) {
                             // --- T9 MODE ---
                             val wordToCommit = getCapitalizedWord(currentPredictions[actualIndex])
                             ic?.commitText(wordToCommit, 1)
@@ -789,6 +837,58 @@ class JoyTypeService : InputMethodService() {
         return super.onKeyUp(keyCode, event)
     }
 
+    override fun onUpdateSelection(oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int, candidatesStart: Int, candidatesEnd: Int) {
+        super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+
+        // 1. FIX THE STUCK CURSOR (Bug 1):
+        // Only let the OS dictate our internal cursor position if the user IS NOT actively holding the joystick.
+        if (!isCursorGliding) {
+            if (isHighlighting && highlightAnchorIndex != -1) {
+                // If we are highlighting, figure out which end is the moving head
+                glideCursorIndex = if (highlightAnchorIndex == newSelStart) newSelEnd else newSelStart
+            } else {
+                glideCursorIndex = newSelEnd
+            }
+        }
+
+        // 2. FIX THE CROSSOVER CANCELLATION (Bug 2):
+        val isTextSelected = newSelStart != newSelEnd
+
+        if (isTextSelected) {
+            if (currentPredictions != UTILITY_ACTIONS) {
+                currentPredictions = UTILITY_ACTIONS
+                predictionIndex = 0
+                updateUI()
+            }
+        } else {
+            // Only auto-cancel selection mode if the user tapped away manually (joystick is resting).
+            // If they are actively gliding, they are probably just crossing over the anchor point!
+            if (!isCursorGliding && currentPredictions == UTILITY_ACTIONS) {
+                currentPredictions = emptyList()
+                isHighlighting = false
+                highlightAnchorIndex = -1
+                updateUI()
+            }
+        }
+    }
+
+    /// Purely to scroll the cursor into the visible area
+    override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        
+        // Wait for the keyboard's layout animation to push the app's window up
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            val ic = currentInputConnection ?: return@postDelayed
+            
+            // The OS ignores setSelection() if the cursor hasn't moved.
+            // Committing a 0-length string forces the target app's input connection 
+            // to update its layout constraints and bring the cursor into the visible viewport!
+            ic.beginBatchEdit()
+            ic.commitText("", 1)
+            ic.endBatchEdit()
+        }, 200L) // 200ms allows standard Android window animations to finish
+    }
+
     private fun executeAction(action: Action, isRepeat: Boolean = false) {
         val ic = currentInputConnection ?: return
 
@@ -801,6 +901,13 @@ class JoyTypeService : InputMethodService() {
             Action.ACCEPT -> {
                 saveUndoSnapshot()
                 fireActionHaptic()
+
+                // --- NEW: UTILITY INTERCEPT ---
+                if (currentPredictions == UTILITY_ACTIONS) {
+                    executeUtilityCommand(currentPredictions[predictionIndex])
+                    return
+                }
+
                 val now = System.currentTimeMillis()
                 val ic = currentInputConnection ?: return
 
@@ -870,6 +977,14 @@ class JoyTypeService : InputMethodService() {
             Action.BACKSPACE_WORD -> {
                 fireActionHaptic()
 
+                // If text is highlighted, just delete the selection
+                if (currentPredictions == UTILITY_ACTIONS) {
+                    saveUndoSnapshot()
+                    ic.commitText("", 1)
+                    resetState()
+                    return
+                }
+
                 if (wordProbabilities.isNotEmpty()) {
                     // COMPOSING MODE: Nuke the entire active input thread
                     wordProbabilities.clear()
@@ -898,7 +1013,7 @@ class JoyTypeService : InputMethodService() {
                 saveUndoSnapshot()
                 fireActionHaptic()
 
-                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0) ?: return
+                val extracted = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return
                 val text = extracted.text.toString()
                 val cursor = extracted.selectionStart
 
@@ -923,7 +1038,7 @@ class JoyTypeService : InputMethodService() {
 
                     // THE FIX: Delete from the start of the word, to whichever is further right: 
                     // The actual end of the word, or the cursor!
-                    val deleteEnd = kotlin.math.max(end, cursor)
+                    val deleteEnd = max(end, cursor)
                     
                     ic.setSelection(start, deleteEnd)
                     ic.commitText("", 1)
@@ -977,6 +1092,13 @@ class JoyTypeService : InputMethodService() {
                 saveUndoSnapshot()
                 fireActionHaptic()
 
+                // If text is highlighted, space deletes it and adds a space
+                if (currentPredictions == UTILITY_ACTIONS) {
+                    ic.commitText(" ", 1)
+                    resetState()
+                    return
+                }
+
                 if (currentPredictions.isNotEmpty()) {
                     if (currentMode == InputMode.T9) {
                         val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
@@ -1001,9 +1123,29 @@ class JoyTypeService : InputMethodService() {
             Action.UNDO -> {
                 if (undoStack.isNotEmpty()) {
                     fireActionHaptic()
+                    val ic = currentInputConnection ?: return
+                    
+                    // Save current state to Redo before we go back
+                    val currentText = ic.getExtractedText(ExtractedTextRequest(), 0)?.text
+                    if (currentText != null) redoStack.push(currentText)
+                    
                     val previousState = undoStack.pop()
                     ic.performContextMenuAction(android.R.id.selectAll)
                     ic.commitText(previousState, 1)
+                }
+            }
+            Action.REDO -> {
+                if (redoStack.isNotEmpty()) {
+                    fireActionHaptic()
+                    val ic = currentInputConnection ?: return
+                    
+                    // Save current state to Undo before we go forward
+                    val currentText = ic.getExtractedText(ExtractedTextRequest(), 0)?.text
+                    if (currentText != null) undoStack.push(currentText)
+                    
+                    val nextState = redoStack.pop()
+                    ic.performContextMenuAction(android.R.id.selectAll)
+                    ic.commitText(nextState, 1)
                 }
             }
             Action.OPEN_SETTINGS -> {
@@ -1018,23 +1160,27 @@ class JoyTypeService : InputMethodService() {
                 
                 if (editorInfo != null) {
                     val actionId = editorInfo.imeOptions and android.view.inputmethod.EditorInfo.IME_MASK_ACTION
-                    
-                    // If the text box has a specific action (Search, Send, Done, Go)
                     if (actionId != android.view.inputmethod.EditorInfo.IME_ACTION_NONE && 
                         actionId != android.view.inputmethod.EditorInfo.IME_ACTION_UNSPECIFIED) {
+                        // If the text box has a specific action (Search, Send, Done, Go)
                         ic.performEditorAction(actionId)
                     } else {
-                        // Otherwise, just inject a standard physical Enter/Return key press
-                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
-                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+                        // Software string insertion inherently triggers 
+                        // the OS's "scroll to cursor" layout pass. Hardware keys do not.
+                        ic.commitText("\n", 1)
                     }
                 }
-                
-                // Optional: If you want the keyboard to forcefully hide itself after pressing Enter
-                // requestHideSelf(0) 
             }
             Action.BACKSPACE_STROKE -> {
                 fireActionHaptic()
+
+                // If text is highlighted, delete the entire selection
+                if (currentPredictions == UTILITY_ACTIONS) {
+                    saveUndoSnapshot()
+                    ic.commitText("", 1)
+                    resetState()
+                    return
+                }
 
                 if (wordProbabilities.isNotEmpty()) {
                     // COMPOSING MODE: Delete the last joystick flick
@@ -1055,14 +1201,14 @@ class JoyTypeService : InputMethodService() {
                 val textBefore = ic.getTextBeforeCursor(100, 0)?.toString() ?: return
                 val match = Regex("\\s*\\S+\\s*$").find(textBefore)
                 val jumpLength = match?.value?.length ?: textBefore.length
-                for(i in 0 until jumpLength) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
+                for(_i in 0 until jumpLength) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
             }
             Action.CURSOR_WORD_RIGHT -> {
                 fireActionHaptic()
                 val textAfter = ic.getTextAfterCursor(100, 0)?.toString() ?: return
                 val match = Regex("^\\s*\\S+").find(textAfter)
                 val jumpLength = match?.value?.length ?: textAfter.length
-                for(i in 0 until jumpLength) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT))
+                for(_i in 0 until jumpLength) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT))
             }
             Action.CYCLE_FWD -> {
                 if (currentPredictions.isNotEmpty()) {
@@ -1095,7 +1241,7 @@ class JoyTypeService : InputMethodService() {
             }
             Action.ADD_TO_DICT -> {
                 fireActionHaptic()
-                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0) ?: return
+                val extracted = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return
                 val text = extracted.text.toString()
                 val cursor = extracted.selectionStart
 
@@ -1111,6 +1257,52 @@ class JoyTypeService : InputMethodService() {
                     android.widget.Toast.makeText(this, "Added: '$targetWord'", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
+            Action.TOGGLE_HIGHLIGHT -> {
+                fireActionHaptic()
+                isHighlighting = !isHighlighting
+                val ic = currentInputConnection ?: return
+                
+                if (isHighlighting) {
+                    val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+                    highlightAnchorIndex = extracted?.selectionStart ?: 0
+                    glideCursorIndex = highlightAnchorIndex
+                } else {
+                    highlightAnchorIndex = -1
+                    // Collapse selection to current cursor to cancel
+                    ic.setSelection(glideCursorIndex, glideCursorIndex) 
+                }
+                updateUI()
+            }
+            Action.CHEAT_MPKFA -> {
+                fireActionHaptic()
+                val ic = currentInputConnection ?: return
+                
+                // The explicit hardware keycodes for M-P-K-F-A
+                val cheatSequence = listOf(
+                    KeyEvent.KEYCODE_M,
+                    KeyEvent.KEYCODE_P,
+                    KeyEvent.KEYCODE_K,
+                    KeyEvent.KEYCODE_F,
+                    KeyEvent.KEYCODE_A
+                )
+
+                // Launch a quick coroutine to simulate human typing
+                CoroutineScope(Dispatchers.Main).launch {
+                    for (keyCode in cheatSequence) {
+                        // 1. Press the key down
+                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+                        
+                        // 2. Hold it for 30ms (gives Winlator time to register the state change)
+                        delay(30) 
+                        
+                        // 3. Release the key
+                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+                        
+                        // 4. Wait 50ms before pressing the next key
+                        delay(50)
+                    }
+                }
+            }
             Action.NONE -> {}
         }
     }
@@ -1121,11 +1313,13 @@ class JoyTypeService : InputMethodService() {
         if (currentText != null) {
             undoStack.push(currentText)
             if (undoStack.size > 20) undoStack.removeAt(0)
+            
+            redoStack.clear() // Any new typing breaks the Redo timeline
         }
     }
 
     private fun resetState() {
-        // THE FIX: Cache the active stroke probabilities BEFORE clearing them!
+        // Cache the active stroke probabilities BEFORE clearing them
         if (wordProbabilities.isNotEmpty()) {
             lastAcceptedProbabilities.clear()
             lastAcceptedProbabilities.addAll(wordProbabilities)
@@ -1156,9 +1350,19 @@ class JoyTypeService : InputMethodService() {
         lastMag = 0f
         lastDetectionType = ""
         registeredDebugPeaks.clear()
+
+        isHighlighting = false
+        highlightAnchorIndex = -1
+        if (::tvSelectionBadge.isInitialized) {
+            tvSelectionBadge.text = "[CUR]"
+            tvSelectionBadge.setTextColor(android.graphics.Color.parseColor("#555555"))
+        }
     }
 
     private fun updateUI() {
+        tvSelectionBadge.text = if (isHighlighting) "[SEL]" else "[CUR]"
+        tvSelectionBadge.setTextColor(if (isHighlighting) android.graphics.Color.parseColor("#FF6B6B") else android.graphics.Color.parseColor("#555555"))
+
         if (currentPredictions.isEmpty() && !isRadialMenuOpen) {
             setRestingUI(isComposingEmpty = wordProbabilities.isNotEmpty())
             return
@@ -1184,30 +1388,29 @@ class JoyTypeService : InputMethodService() {
         }
 
         // 2. Format the text
-        var display = if (isRadialMenuOpen) {
+        val isUtilityMode = currentPredictions == UTILITY_ACTIONS
+        val activeColor = if (isUtilityMode) "#FF6B6B" else "#D084FF" // Soft Red vs Soft Purple
+
+        val valDisplay = if (isRadialMenuOpen) {
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
             itemsToDraw.mapIndexed { index, word ->
-                // Inject spaces around the character to widen the display for symbols
                 val textToDraw = if (isSpecialCharMode) "  $word  " else word
-                
-                // Build the arrow string with a trailing space
                 val dir = if (index < arrows.size) "${arrows[index]} " else ""
                 
                 if (index == radialSelectedIndex) {
-                    // THE FIX: The brackets and arrow are gray (#555555). Only textToDraw is Orange (#FFA500)
-                    "<b>[<font color='#555555'>$dir</font><font color='#FFA500'>$textToDraw</font><font color='#555555'>]</font></b>" 
+                    "<b>[<font color='#555555'>$dir</font><font color='$activeColor'>$textToDraw</font><font color='#555555'>]</font></b>" 
                 } else {
                     "<font color='#555555'>$dir$textToDraw</font>"
                 }
             }.joinToString("   ")
         } else {
             itemsToDraw.mapIndexed { index, word ->
-                if (index == predictionIndex) "<b><font color='#D084FF'>[$word]</font></b>" 
+                if (index == predictionIndex) "<b><font color='$activeColor'>[$word]</font></b>" 
                 else "<font color='#777777'>$word</font>" 
             }.joinToString("   ")
         }
 
-        tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
+        tvPredictions.text = android.text.Html.fromHtml(valDisplay, android.text.Html.FROM_HTML_MODE_LEGACY)
 
         // We are typing, so hide the Mode Badge
         tvModeBadge.visibility = View.GONE
@@ -1345,4 +1548,34 @@ class JoyTypeService : InputMethodService() {
         // Hide pagination when resting!
         tvPaginationBadge.visibility = View.GONE 
     }
+
+    private fun executeUtilityCommand(command: String) {
+        val ic = currentInputConnection ?: return
+        when (command) {
+            "Cancel" -> { 
+                // Do nothing to the text/clipboard. Just fall through to cleanup.
+            }
+            "Copy" -> ic.performContextMenuAction(android.R.id.copy)
+            "Paste" -> ic.performContextMenuAction(android.R.id.paste)
+            "Cut" -> ic.performContextMenuAction(android.R.id.cut)
+            "Select All" -> ic.performContextMenuAction(android.R.id.selectAll)
+            "Toggle Case" -> {
+                val selectedText = ic.getSelectedText(0)?.toString() ?: ""
+                if (selectedText.isNotEmpty()) {
+                    val newText = if (selectedText == selectedText.uppercase()) {
+                        selectedText.lowercase()
+                    } else {
+                        selectedText.uppercase()
+                    }
+                    ic.commitText(newText, 1) // This replaces the selection automatically
+                }
+            }
+        }
+        
+        // Turn off highlight mode after a command
+        isHighlighting = false
+        val newCursorPos = ic.getExtractedText(ExtractedTextRequest(), 0)?.selectionEnd ?: glideCursorIndex
+        ic.setSelection(newCursorPos, newCursorPos) 
+        resetState()
+    }   
 }

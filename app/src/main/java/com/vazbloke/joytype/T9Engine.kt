@@ -3,8 +3,13 @@ package com.vazbloke.joytype
 import android.content.Context
 import android.os.Environment
 import java.io.BufferedReader
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.io.InputStreamReader
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import kotlinx.coroutines.launch
 
 class TrieNode(
     var isWord: Boolean = false,
@@ -26,23 +31,55 @@ class T9Engine {
     )
 
     private val digitToChars = mapOf(
-        '1' to listOf('j', 'k', 'l'), // NEW
+        '1' to listOf('j', 'k', 'l'),
         '2' to listOf('a', 'b', 'c'),
         '3' to listOf('d', 'e', 'f'),
         '4' to listOf('g', 'h', 'i'),
-        // No '5' mapping required
         '6' to listOf('m', 'n', 'o'),
         '7' to listOf('p', 'q', 'r', 's'),
         '8' to listOf('t', 'u', 'v'),
         '9' to listOf('w', 'x', 'y', 'z')
     )
 
-    private val root = TrieNode()
+    private var root = TrieNode()
     private var allWordsList = mutableListOf<String>()
-
     private var customWordsList = mutableListOf<String>()
 
+    // Generates a unique fingerprint based on the APK's update time and the custom dictionary's modified time
+    private fun getCacheFingerprint(context: Context): String {
+        val appUpdateTime = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+        } catch (e: Exception) { 0L }
+        val customDictTime = getCustomDictFile().lastModified()
+        return "${appUpdateTime}_${customDictTime}"
+    }
+
     fun loadDictionary(context: Context) {
+        val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        val currentFingerprint = getCacheFingerprint(context)
+        val savedFingerprint = prefs.getString("dict_cache_fingerprint", "")
+        val binFile = File(context.cacheDir, "dictionary_cache.bin")
+
+        // --- THE FAST PATH (Binary Load) ---
+        if (binFile.exists() && currentFingerprint == savedFingerprint) {
+            try {
+                DataInputStream(BufferedInputStream(binFile.inputStream())).use { input ->
+                    root = readNode(input)
+                    readStrings(input, allWordsList)
+                    readStrings(input, customWordsList)
+                }
+                return // Successfully loaded from cache in milliseconds!
+            } catch (e: Exception) {
+                e.printStackTrace()
+                // If the binary file is corrupted, fall through to the slow path
+            }
+        }
+
+        // --- THE SLOW PATH (CSV Parsing) ---
+        root.children.clear()
+        allWordsList.clear()
+        customWordsList.clear()
+
         // 1. Load Base Dictionary
         try {
             val inputStream = context.assets.open("en.csv")
@@ -51,7 +88,7 @@ class T9Engine {
                 val parts = line.split("\t", ",")
                 if (parts.isNotEmpty()) {
                     val word = parts[0].lowercase()
-                    // FIX: Allow apostrophes through the filter!
+                    // Allow apostrophes through the filter!
                     if (word.all { it in 'a'..'z' || it == '\'' }) {
                         val freq = if (parts.size > 1) parts[1].toIntOrNull() ?: 0 else 0
                         insertWord(word, freq)
@@ -70,7 +107,7 @@ class T9Engine {
                     val parts = line.split("\t", ",")
                     if (parts.isNotEmpty()) {
                         val word = parts[0].trim().lowercase()
-                        // FIX: Allow apostrophes here too
+                        // Allow apostrophes here too
                         if (word.isNotEmpty() && word.all { it in 'a'..'z' || it == '\'' }) {
                             insertWord(word, 999999)
                             customWordsList.add(word)
@@ -85,6 +122,16 @@ class T9Engine {
         insertWord("a", 999999)
         if (!allWordsList.contains("i")) allWordsList.add("i")
         if (!allWordsList.contains("a")) allWordsList.add("a")
+
+        // 3. Serialize to Binary Cache for the next boot
+        try {
+            DataOutputStream(BufferedOutputStream(binFile.outputStream())).use { out ->
+                writeNode(out, root)
+                writeStrings(out, allWordsList)
+                writeStrings(out, customWordsList)
+            }
+            prefs.edit().putString("dict_cache_fingerprint", currentFingerprint).apply()
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
     private fun insertWord(word: String, frequency: Int) {
@@ -226,7 +273,7 @@ class T9Engine {
         return getProbabilisticPredictions(deterministicProbs)
     }
 
- // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)
+    // Fallback for strict deterministic typing (LJOY_RBUTTONS mode)
 
     fun getCharsForDigit(digit: Char): List<Char> = digitToChars[digit] ?: emptyList()
     fun getAllWords(): List<String> = allWordsList
@@ -276,9 +323,56 @@ class T9Engine {
     }
 
     fun fullReload(context: Context) {
-        // Wipe the trie and lists clean
-        root.children.clear()
-        allWordsList.clear()
-        loadDictionary(context)
+        val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        prefs.edit().remove("dict_cache_fingerprint").apply()
+        
+        val binFile = File(context.cacheDir, "dictionary_cache.bin")
+        if (binFile.exists()) binFile.delete()
+        
+        // Load on a background thread so the UI doesn't hang!
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            loadDictionary(context)
+        }
+    }
+
+    // --- BINARY SERIALIZATION HELPERS ---
+    
+    private fun writeNode(out: DataOutputStream, node: TrieNode) {
+        out.writeBoolean(node.isWord)
+        out.writeInt(node.frequency)
+        out.writeInt(node.children.size)
+        
+        for ((char, child) in node.children) {
+            out.writeChar(char.code)
+            writeNode(out, child)
+        }
+    }
+
+    private fun readNode(input: DataInputStream): TrieNode {
+        val node = TrieNode()
+        node.isWord = input.readBoolean()
+        node.frequency = input.readInt()
+        val childCount = input.readInt()
+        
+        for (i in 0 until childCount) {
+            val char = input.readChar()
+            val child = readNode(input)
+            node.children[char] = child
+        }
+        return node
+    }
+
+    private fun writeStrings(out: DataOutputStream, list: List<String>) {
+        out.writeInt(list.size)
+        for (word in list) {
+            out.writeUTF(word)
+        }
+    }
+
+    private fun readStrings(input: DataInputStream, list: MutableList<String>) {
+        val size = input.readInt()
+        for (i in 0 until size) {
+            list.add(input.readUTF())
+        }
     }
 }

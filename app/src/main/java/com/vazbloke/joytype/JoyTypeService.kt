@@ -224,7 +224,8 @@ class JoyTypeService : InputMethodService() {
         autoSpace = prefs.getBoolean("autospace_after_accept", true)
         doubleAcceptPeriod = prefs.getBoolean("double_accept_period", true)
         autoCap = prefs.getBoolean("auto_capitalization", true)
-        visualDebug = prefs.getBoolean("visual_debug_mode", true)
+
+        visualDebug = prefs.getBoolean("visual_debug_mode", false)
 
         // Inside loadSettings():
         val profileString = prefs.getString("haptic_profile", "MEDIUM") ?: "MEDIUM"
@@ -248,7 +249,7 @@ class JoyTypeService : InputMethodService() {
         m2KeyCode = prefs.getInt("key_mod_2", DefaultBindings.MAP["key_mod_2"]!!)
         m3KeyCode = prefs.getInt("key_mod_3", DefaultBindings.MAP["key_mod_3"]!!)
 
-        val radialStr = prefs.getString("joy_radial_mod", "NONE")
+        val radialStr = prefs.getString("joy_radial_mod", "M1")
         radialModifier = when(radialStr) {
             "M1" -> ModifierKey.M1
             "M2" -> ModifierKey.M2
@@ -256,7 +257,7 @@ class JoyTypeService : InputMethodService() {
             else -> ModifierKey.NONE
         }
         
-        val cursorStr = prefs.getString("joy_cursor_mod", "NONE")
+        val cursorStr = prefs.getString("joy_cursor_mod", "M2")
         cursorModifier = when(cursorStr) {
             "M1" -> ModifierKey.M1
             "M2" -> ModifierKey.M2
@@ -741,10 +742,11 @@ class JoyTypeService : InputMethodService() {
                             
                             ic?.commitText(charToCommit, 1)
                             
-                            // Re-apply the space on the right side if autoSpace is on!
-                            if (autoSpace) { 
+                            // Re-apply the space on the right side ONLY if autoSpace is on AND we are in T9 Mode!
+                            if (autoSpace && currentMode == InputMode.T9) { 
                                 ic?.commitText(" ", 1)
                             }
+
                             ic?.endBatchEdit()
                         } else {
                             // Normal characters (like @ or /) just commit exactly where they are
@@ -1200,7 +1202,7 @@ class JoyTypeService : InputMethodService() {
             }.joinToString("   ")
         } else {
             itemsToDraw.mapIndexed { index, word ->
-                if (index == predictionIndex) "<b><font color='#A3FF00'>[$word]</font></b>" 
+                if (index == predictionIndex) "<b><font color='#D084FF'>[$word]</font></b>" 
                 else "<font color='#777777'>$word</font>" 
             }.joinToString("   ")
         }

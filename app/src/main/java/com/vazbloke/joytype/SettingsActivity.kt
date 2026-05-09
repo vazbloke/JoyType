@@ -53,9 +53,7 @@ class KeyBindingPreference(context: Context, attrs: AttributeSet?) : Preference(
             android.app.AlertDialog.Builder(context)
                 .setItems(displayOptions) { _, which ->
                     val selected = options[which]
-                    if (selected != "NONE" && (selected == joyRadial || selected == joyCursor)) {
-                        android.widget.Toast.makeText(context, "Modifier used for joystick. Unset to use here.", android.widget.Toast.LENGTH_LONG).show()
-                    } else if (selected != currentModifier) {
+                    if (selected != currentModifier) {
                         currentModifier = selected
                         modText.text = "▼ $currentModifier"
                         onModifierChanged?.invoke(selected)
@@ -134,14 +132,16 @@ class SettingsActivity : AppCompatActivity() {
         private lateinit var prefs: SharedPreferences
         private var originalSummary: CharSequence? = null
 
-        val actionKeys = listOf(
-            "key_accept", "key_cycle_fwd", "key_cycle_back", "key_recompose", 
-            "key_backspace_word", "key_backspace_stroke", 
-            "key_add_space", "key_clear_text", "key_enter", 
-            "key_undo", "key_redo", "key_close", "key_open_settings", "key_word_left", "key_word_right", "key_toggle_mode", "key_add_to_dict", "key_toggle_highlight"
-        )
-
+        // --- THE REFACTOR ---
+        // 1. Core modifiers still need hardcoded string keys since they aren't "Actions"
         val modKeys = listOf("key_mod_1", "key_mod_2", "key_mod_3")
+        
+        // 2. Dynamically pull all action strings from your SSOT Enum!
+        val actionKeys = JoyTypeService.Action.values()
+            .filter { it != JoyTypeService.Action.NONE }
+            .map { it.prefKey }
+            
+        // 3. Combine them for the clash prevention loop
         val allKeys = modKeys + actionKeys
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
@@ -158,19 +158,24 @@ class SettingsActivity : AppCompatActivity() {
                 startActivity(android.content.Intent(requireContext(), MacroManagerActivity::class.java))
                 true
             }
-            
-            // Added key_mod_1 and key_mod_2 to the listenable list!
-            val bindableKeys = listOf(
-                "key_mod_1", "key_mod_2", 
-                "key_accept", "key_recompose", "key_backspace_word",
-                "key_backspace_stroke", "key_add_space", "key_clear_text", "key_enter", 
-                "key_undo", "key_redo", "key_close", "key_open_settings"
-            )
 
             for (key in allKeys) {
                 val pref = findPreference<Preference>(key)
+                val action = JoyTypeService.Action.values().firstOrNull { it.prefKey == key }
 
-                val defaultKey = (DefaultBindings.MAP[key] as? Int) ?: -1
+                // --- THE REFACTOR ---
+                // Pull defaults directly from the Enum (or hardcode the 3 core mods)
+                val defaultKey = if (key in modKeys) {
+                    when (key) {
+                        "key_mod_1" -> KeyEvent.KEYCODE_BUTTON_C
+                        "key_mod_2" -> KeyEvent.KEYCODE_BUTTON_Z
+                        else -> -1
+                    }
+                } else {
+                    val action = JoyTypeService.Action.values().firstOrNull { it.prefKey == key }
+                    action?.defaultKey ?: -1
+                }
+
                 val currentCode = prefs.getInt(key, defaultKey)
 
                 pref?.summary = if (currentCode != -1) "Bound to: ${getKeyName(currentCode)}" else "Unbound"
@@ -183,12 +188,14 @@ class SettingsActivity : AppCompatActivity() {
 
                 if (pref is KeyBindingPreference) {
                     val modKey = key.replace("key_", "mod_")
-                    pref.currentModifier = prefs.getString(modKey, "NONE") ?: "NONE"
+                    
+                    // Pull the default modifier from the Enum, and use it as the fallback!
+                    val defaultModStr = action?.defaultMod?.name ?: "NONE"
+                    pref.currentModifier = prefs.getString(modKey, defaultModStr) ?: "NONE"
                     
                     pref.onModifierChanged = { newMod -> 
                         val keyCode = prefs.getInt(key, -1)
                         if (keyCode != -1) {
-                            // If modifier changes, check for new clash with existing combos
                             for(otherKey in actionKeys) {
                                 if (otherKey != key && prefs.getInt(otherKey, -2) == keyCode) {
                                     if (prefs.getString(otherKey.replace("key_", "mod_"), "NONE") == newMod) {

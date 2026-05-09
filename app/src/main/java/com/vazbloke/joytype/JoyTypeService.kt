@@ -34,8 +34,18 @@ class JoyTypeService : InputMethodService() {
     
     // --- Radial UI State ---
     private var isRadialMenuOpen = false
-    private var isSpecialCharMode = false
     private var radialSelectedIndex = 0
+    enum class RadialState { MACRO, UTILITY, PREDICTIONS, SPECIAL_CHARS }
+
+    private val currentRadialState: RadialState
+        get() {
+            if (currentMode == InputMode.MACRO) return RadialState.MACRO
+            if (currentPredictions === UTILITY_ACTIONS) return RadialState.UTILITY
+            // Catch both T9 and ABC predictions
+            if (currentPredictions.isNotEmpty()) return RadialState.PREDICTIONS 
+            return RadialState.SPECIAL_CHARS
+        }
+    private var radialDidMove = false
 
     // NEW: Pagination State
     private var radialPage = 0 
@@ -100,11 +110,29 @@ class JoyTypeService : InputMethodService() {
     data class KeyCombo(val keyCode: Int, val modifier: ModifierKey)
     private val keyBindings = mutableMapOf<KeyCombo, Action>()
 
-    enum class Action {
-        ACCEPT, RECOMPOSE, BACKSPACE_WORD, BACKSPACE_STROKE, 
-        ADD_SPACE, CLEAR_TEXT, UNDO, REDO, OPEN_SETTINGS, NONE, ENTER, 
-        CLOSE_KEYBOARD, CURSOR_WORD_LEFT, CURSOR_WORD_RIGHT,
-        CYCLE_FWD, CYCLE_BACK, TOGGLE_MODE, ADD_TO_DICT, TOGGLE_HIGHLIGHT
+    enum class Action(val xmlName: String, val defaultKey: Int, val defaultMod: ModifierKey) {
+        ACCEPT("accept", KeyEvent.KEYCODE_BUTTON_R1, ModifierKey.NONE),
+        RECOMPOSE("recompose", KeyEvent.KEYCODE_BUTTON_L1, ModifierKey.NONE),
+        BACKSPACE_WORD("backspace_word", KeyEvent.KEYCODE_BUTTON_Y, ModifierKey.NONE),
+        BACKSPACE_STROKE("backspace_stroke", KeyEvent.KEYCODE_BUTTON_B, ModifierKey.NONE),
+        ADD_SPACE("add_space", KeyEvent.KEYCODE_BUTTON_A, ModifierKey.NONE),
+        CLEAR_TEXT("clear_text", -1, ModifierKey.NONE),
+        UNDO("undo", KeyEvent.KEYCODE_BUTTON_X, ModifierKey.NONE),
+        REDO("redo", KeyEvent.KEYCODE_BUTTON_X, ModifierKey.M1),
+        CLOSE_KEYBOARD("close", KeyEvent.KEYCODE_BUTTON_SELECT, ModifierKey.NONE),
+        OPEN_SETTINGS("open_settings", KeyEvent.KEYCODE_BUTTON_START, ModifierKey.NONE),
+        ENTER("enter", KeyEvent.KEYCODE_BUTTON_R2, ModifierKey.NONE),
+        CURSOR_WORD_LEFT("word_left", KeyEvent.KEYCODE_DPAD_LEFT, ModifierKey.M2),
+        CURSOR_WORD_RIGHT("word_right", KeyEvent.KEYCODE_DPAD_RIGHT, ModifierKey.M2),
+        CYCLE_FWD("cycle_fwd", KeyEvent.KEYCODE_BUTTON_R1, ModifierKey.M1),
+        CYCLE_BACK("cycle_back", KeyEvent.KEYCODE_BUTTON_L1, ModifierKey.M1),
+        TOGGLE_MODE("toggle_mode", KeyEvent.KEYCODE_BUTTON_L2, ModifierKey.NONE),
+        ADD_TO_DICT("add_to_dict", KeyEvent.KEYCODE_BUTTON_THUMBR, ModifierKey.NONE),
+        TOGGLE_HIGHLIGHT("toggle_highlight", KeyEvent.KEYCODE_BUTTON_L2, ModifierKey.M1),
+        NONE("none", -1, ModifierKey.NONE);
+
+        val prefKey get() = "key_$xmlName"
+        val prefMod get() = "mod_$xmlName"
     }
 
     enum class InputMode { T9, ABC, MACRO }
@@ -130,16 +158,19 @@ class JoyTypeService : InputMethodService() {
             when (currentMode) {
                 InputMode.T9 -> {
                     tvModeBadge.text = "[T9]"
+                    tvModeBadge.setTextColor(android.graphics.Color.parseColor("#555555"))
                     tvModeBadge.visibility = View.VISIBLE
                     if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.GONE
                 }
                 InputMode.ABC -> {
                     tvModeBadge.text = "[ABC]"
+                    tvModeBadge.setTextColor(android.graphics.Color.parseColor("#555555"))
                     tvModeBadge.visibility = View.VISIBLE
                     if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.GONE
                 }
                 InputMode.MACRO -> {
                     tvModeBadge.text = "[MAC]"
+                    tvModeBadge.setTextColor(android.graphics.Color.parseColor("#E6C229"))
                     tvModeBadge.visibility = View.VISIBLE
                     if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.VISIBLE
                 }
@@ -327,9 +358,9 @@ class JoyTypeService : InputMethodService() {
         }
 
         // Load Modifiers using SSOT
-        m1KeyCode = prefs.getInt("key_mod_1", (DefaultBindings.MAP["key_mod_1"] as? Int) ?: -1)
-        m2KeyCode = prefs.getInt("key_mod_2", (DefaultBindings.MAP["key_mod_2"] as? Int) ?: -1)
-        m3KeyCode = prefs.getInt("key_mod_3", (DefaultBindings.MAP["key_mod_3"] as? Int) ?: -1)
+        m1KeyCode = prefs.getInt("key_mod_1", KeyEvent.KEYCODE_BUTTON_C)
+        m2KeyCode = prefs.getInt("key_mod_2", KeyEvent.KEYCODE_BUTTON_Z)
+        m3KeyCode = prefs.getInt("key_mod_3", -1)
 
         val radialStr = prefs.getString("joy_radial_mod", "M1")
         radialModifier = when(radialStr) {
@@ -349,42 +380,22 @@ class JoyTypeService : InputMethodService() {
 
         keyBindings.clear()
 
-        // Helper function to pair keys with their dropdown modifiers
-        fun bind(action: Action, keyPref: String, modPref: String) {
-            val defaultKey = (DefaultBindings.MAP[keyPref] as? Int) ?: -1
-            val keyCode = prefs.getInt(keyPref, defaultKey)
-            val modString = prefs.getString(modPref, "NONE")
-            val mod = when (modString) {
-                "M1" -> ModifierKey.M1
-                "M2" -> ModifierKey.M2
-                "M3" -> ModifierKey.M3
-                else -> ModifierKey.NONE
-            }
+        // The Enum is now the Single Source of Truth
+        for (action in Action.values()) {
+            if (action == Action.NONE) continue
+            
+            val keyCode = prefs.getInt(action.prefKey, action.defaultKey)
+            val modString = prefs.getString(action.prefMod, action.defaultMod.name)
+            
+            val mod = try {
+                ModifierKey.valueOf(modString ?: "NONE")
+            } catch (e: Exception) { ModifierKey.NONE }
+            
             if (keyCode != -1) {
                 keyBindings[KeyCombo(keyCode, mod)] = action
             }
         }
 
-        // Bind all actions with default values
-        bind(Action.ACCEPT, "key_accept", "mod_accept")
-        bind(Action.RECOMPOSE, "key_recompose", "mod_cycle_prev")
-        bind(Action.BACKSPACE_WORD, "key_backspace_word", "mod_backspace_word")
-        bind(Action.BACKSPACE_STROKE, "key_backspace_stroke", "mod_backspace_stroke")
-        bind(Action.ADD_SPACE, "key_add_space", "mod_add_space")
-        bind(Action.CLEAR_TEXT, "key_clear_text", "mod_clear_text")
-        bind(Action.ENTER, "key_enter", "mod_enter")
-        bind(Action.UNDO, "key_undo", "mod_undo")
-        bind(Action.REDO, "key_redo", "mod_redo")
-        bind(Action.CLOSE_KEYBOARD, "key_close", "mod_close")
-        bind(Action.OPEN_SETTINGS, "key_open_settings", "mod_open_settings")
-        bind(Action.CURSOR_WORD_LEFT, "key_word_left", "mod_word_left")
-        bind(Action.CURSOR_WORD_RIGHT, "key_word_right", "mod_word_right")
-        bind(Action.CYCLE_FWD, "key_cycle_fwd", "mod_cycle_fwd")
-        bind(Action.CYCLE_BACK, "key_cycle_back", "mod_cycle_back")
-        bind(Action.TOGGLE_MODE, "key_toggle_mode", "mod_toggle_mode")
-        bind(Action.ADD_TO_DICT, "key_add_to_dict", "mod_add_to_dict")
-        // # TODO: Why bind to none below?
-        bind(Action.TOGGLE_HIGHLIGHT, "key_toggle_highlight", "NONE") // Hardcode "NONE" since KeyBindingPreference handles the combo
     }
 
     override fun onCreateInputView(): View {
@@ -411,10 +422,6 @@ class JoyTypeService : InputMethodService() {
                 android.widget.Toast.makeText(this, "Flick joystick to start typing", android.widget.Toast.LENGTH_SHORT).show()
             }
         }
-
-        // Force the initial reactive draws on boot!
-        updateModeBadgeUI()
-        updateSelectionBadgeUI()
         
         return view
     }
@@ -440,16 +447,19 @@ class JoyTypeService : InputMethodService() {
 
             // --- RADIAL UI JOYSTICK INTERCEPT ---
             if (isRadialMenuOpen) {
-                if (mag > 0.3f) { 
+                if (mag > 0.3f) {
+                    radialDidMove = true
+
                     var angle = atan2(y.toDouble(), x.toDouble()) 
                     angle += Math.PI / 2.0 
                     if (angle < 0) angle += 2 * Math.PI
 
                     val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
-                    val maxPages = if (isSpecialCharMode) {
-                        kotlin.math.ceil(SPECIAL_CHARS.size / 8.0).toInt()
-                    } else {
-                        kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
+                    val maxPages = when(currentRadialState) {
+                        RadialState.MACRO -> kotlin.math.ceil(macroLibrary.size / 8.0).toInt()
+                        RadialState.SPECIAL_CHARS -> kotlin.math.ceil(SPECIAL_CHARS.size / 8.0).toInt()
+                        RadialState.UTILITY -> 1
+                        RadialState.PREDICTIONS -> kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
                     }
 
                     if (radialLastOctant != -1 && octant != radialLastOctant) {
@@ -504,15 +514,15 @@ class JoyTypeService : InputMethodService() {
 
                     radialLastOctant = octant
 
-                    val currentItems = if (isSpecialCharMode) {
-                        val start = radialPage * 8
-                        val end = kotlin.math.min(start + 8, SPECIAL_CHARS.size)
-                        if (start < SPECIAL_CHARS.size) SPECIAL_CHARS.subList(start, end) else emptyList()
-                    } else {
-                        val start = radialPage * 8
-                        val end = kotlin.math.min(start + 8, currentPredictions.size)
-                        if (start < currentPredictions.size) currentPredictions.subList(start, end) else emptyList()
+                    val activeItems = when(currentRadialState) {
+                        RadialState.MACRO -> macroLibrary
+                        RadialState.SPECIAL_CHARS -> SPECIAL_CHARS
+                        RadialState.UTILITY -> UTILITY_ACTIONS
+                        RadialState.PREDICTIONS -> currentPredictions
                     }
+                    val start = radialPage * 8
+                    val end = kotlin.math.min(start + 8, activeItems.size)
+                    val currentItems = if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
 
                     if (currentItems.isNotEmpty()) {
                         // Lock the visual selection if pegged against a wall
@@ -694,17 +704,29 @@ class JoyTypeService : InputMethodService() {
                     } else {
                         // --- MANUAL ABC MODE ---
                         val digitMap = generateProbabilityMap(maxPt)
-                        val winningDigit = digitMap.maxByOrNull { it.value }?.key ?: '5'
                         
-                        val baseChars = t9Engine.getCharsForDigit(winningDigit)
+                        // THE FIX: Sort by probability to grab the winner AND the runner-up!
+                        val sortedDigits = digitMap.entries.sortedByDescending { it.value }
+                        val winningDigit = sortedDigits.getOrNull(0)?.key ?: '5'
+                        val runnerUpDigit = sortedDigits.getOrNull(1)?.key
+                        
                         val chars = mutableListOf<String>()
                         
-                        // 1. Add lowercase characters
-                        chars.addAll(baseChars.map { it.toString() })
-                        // 2. Add uppercase characters
-                        chars.addAll(baseChars.map { it.uppercaseChar().toString() })
-                        // 3. Add the number
-                        chars.add(winningDigit.toString())
+                        // Helper lambda to format and inject a digit's characters
+                        val injectChars = { targetDigit: Char ->
+                            val baseChars = t9Engine.getCharsForDigit(targetDigit)
+                            chars.addAll(baseChars.map { it.toString() })
+                            chars.addAll(baseChars.map { it.uppercaseChar().toString() })
+                            chars.add(targetDigit.toString())
+                        }
+                        
+                        // 1. Inject the primary intended digit
+                        injectChars(winningDigit)
+                        
+                        // 2. Inject the runner-up digit (in case their angle was slightly off)
+                        if (runnerUpDigit != null) {
+                            injectChars(runnerUpDigit)
+                        }
                         
                         currentPredictions = chars
                         predictionIndex = 0
@@ -759,7 +781,7 @@ class JoyTypeService : InputMethodService() {
         // Ensure it doesn't trigger if targetRadialKey is -1 (NONE selected)
         if (targetRadialKey != -1 && keyCode == targetRadialKey) {
             isRadialMenuOpen = true
-            isSpecialCharMode = currentPredictions.isEmpty()
+            radialDidMove = false
             radialSelectedIndex = 0
             radialPage = 0
             radialLastOctant = -1
@@ -776,17 +798,32 @@ class JoyTypeService : InputMethodService() {
         // Action Check
         val currentMod = if (isM1Held) ModifierKey.M1 else if (isM2Held) ModifierKey.M2 else if (isM3Held) ModifierKey.M3 else ModifierKey.NONE
         val action = keyBindings[KeyCombo(keyCode, currentMod)]
-        
+
         if (action != null) {
-            executeAction(action)
+            if (action != Action.NONE) {
+                
+                // THE NEW RADIAL DROP INTERCEPTOR
+                if (isRadialMenuOpen) {
+                    isRadialMenuOpen = false
+                    
+                    if (currentPredictions == UTILITY_ACTIONS) {
+                        currentPredictions = emptyList()
+                        isHighlighting = false
+                        highlightAnchorIndex = -1
+                    }
+                    updateUI()
+                }
 
-            // Start the repeat timer (Ignore Action.NONE and Actions we don't want repeating)
-            if (action != Action.NONE && action != Action.CLOSE_KEYBOARD && action != Action.OPEN_SETTINGS) {
-                repeatingAction = action
-                repeatHandler.postDelayed(repeatRunnable, repeatDelay)
+                executeAction(action)
+
+                // Start the repeat timer
+                if (action != Action.NONE && action != Action.CLOSE_KEYBOARD && action != Action.OPEN_SETTINGS) {
+                    repeatingAction = action
+                    repeatHandler.postDelayed(repeatRunnable, repeatDelay)
+                }
+
+                return true
             }
-
-            return true
         }
 
         // D-PAD TEXT CURSOR PASSTHROUGH
@@ -832,66 +869,68 @@ class JoyTypeService : InputMethodService() {
         if (keyCode == targetRadialKey) {
             if (isRadialMenuOpen) {
                 isRadialMenuOpen = false
-
-                // Cleanup the animation state
                 tvPredictions.animate().cancel()
                 tvPredictions.translationY = 0f
 
-                val ic = currentInputConnection
-                
-                if (isSpecialCharMode) {
+                // THE SAFETY CATCH: Only execute if they actively flicked the stick!
+                if (radialDidMove) {
                     val actualIndex = (radialPage * 8) + radialSelectedIndex
-                    if (actualIndex < SPECIAL_CHARS.size) {
-                        saveUndoSnapshot()
-                        
-                        val charToCommit = SPECIAL_CHARS[actualIndex]
-                        
-                        // THE FIX: Smart Punctuation (Cling to left word)
-                        val clingyPunctuation = listOf(".", ",", "?", "!", ":", ";", ")", "]", "}")
-                        
-                        if (clingyPunctuation.contains(charToCommit)) {
-                            ic?.beginBatchEdit()
-                            val textBefore = ic?.getTextBeforeCursor(1, 0)?.toString() ?: ""
-                            
-                            // If there is an auto-space in the way, eat it!
-                            if (textBefore == " ") {
-                                ic?.deleteSurroundingText(1, 0) 
-                            }
-                            
-                            ic?.commitText(charToCommit, 1)
-
-                            // Re-apply the space on the right side ONLY if autoSpace is on AND we are in T9 Mode!
-                            if (autoSpace && currentMode == InputMode.T9) { 
-                                ic?.commitText(" ", 1)
-                            }
-
-                            ic?.endBatchEdit()
-                        } else {
-                            // Normal characters (like @ or /) just commit exactly where they are
-                            ic?.commitText(charToCommit, 1)
-                        }
-                    }
-                } else if (currentPredictions.isNotEmpty()) {
-                    saveUndoSnapshot()
-                    val actualIndex = (radialPage * 8) + radialSelectedIndex
+                    val ic = currentInputConnection
                     
-                    if (actualIndex < currentPredictions.size) {
-                        if (currentPredictions == UTILITY_ACTIONS) {
-                            executeUtilityCommand(currentPredictions[actualIndex])
-                        } else if (currentMode == InputMode.T9) {
-                            // --- T9 MODE ---
-                            val wordToCommit = getCapitalizedWord(currentPredictions[actualIndex])
-                            ic?.commitText(wordToCommit, 1)
-                            if (autoSpace) ic?.commitText(" ", 1)
-                            lastAcceptTime = System.currentTimeMillis()
-                        } else {
-                            // --- MANUAL MODE ---
-                            // Absolute raw control. No capitalization, no spaces.
-                            ic?.commitText(currentPredictions[actualIndex], 1)
+                    when (currentRadialState) {
+                        RadialState.MACRO -> {
+                            if (actualIndex < macroLibrary.size) {
+                                val selectedMacro = macroLibrary[actualIndex]
+                                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                                    for (code in selectedMacro.sequence) {
+                                        ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+                                        kotlinx.coroutines.delay(15)
+                                        ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+                                        kotlinx.coroutines.delay(30)
+                                    }
+                                }
+                            }
+                        }
+                        RadialState.SPECIAL_CHARS -> {
+                            if (actualIndex < SPECIAL_CHARS.size) {
+                                saveUndoSnapshot()
+                                val charToCommit = SPECIAL_CHARS[actualIndex]
+                                val clingyPunctuation = listOf(".", ",", "?", "!", ":", ";", ")", "]", "}")
+                                
+                                if (clingyPunctuation.contains(charToCommit)) {
+                                    ic?.beginBatchEdit()
+                                    val textBefore = ic?.getTextBeforeCursor(1, 0)?.toString() ?: ""
+                                    if (textBefore == " ") ic?.deleteSurroundingText(1, 0)
+                                    ic?.commitText(charToCommit, 1)
+                                    if (autoSpace && currentMode == InputMode.T9) ic?.commitText(" ", 1)
+                                    ic?.endBatchEdit()
+                                } else {
+                                    ic?.commitText(charToCommit, 1)
+                                }
+                            }
+                        }
+                        RadialState.UTILITY -> {
+                            if (actualIndex < UTILITY_ACTIONS.size) {
+                                executeUtilityCommand(UTILITY_ACTIONS[actualIndex])
+                            }
+                        }
+                        RadialState.PREDICTIONS -> {
+                            if (actualIndex < currentPredictions.size) {
+                                saveUndoSnapshot()
+                                if (currentMode == InputMode.T9) {
+                                    val wordToCommit = getCapitalizedWord(currentPredictions[actualIndex])
+                                    smartCommitText(wordToCommit)
+                                    if (autoSpace) smartCommitText(" ")
+                                    lastAcceptTime = System.currentTimeMillis()
+                                } else {
+                                    smartCommitText(currentPredictions[actualIndex])
+                                }
+                            }
                         }
                     }
-                    resetState() 
                 }
+                
+                resetState() 
                 updateUI()
             }
             return true
@@ -912,7 +951,7 @@ class JoyTypeService : InputMethodService() {
     override fun onUpdateSelection(oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int, candidatesStart: Int, candidatesEnd: Int) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
 
-        // 1. FIX THE STUCK CURSOR (Bug 1):
+        // FIX THE STUCK CURSOR
         // Only let the OS dictate our internal cursor position if the user IS NOT actively holding the joystick.
         if (!isCursorGliding) {
             if (isHighlighting && highlightAnchorIndex != -1) {
@@ -923,10 +962,11 @@ class JoyTypeService : InputMethodService() {
             }
         }
 
-        // 2. FIX THE CROSSOVER CANCELLATION (Bug 2):
+        // FIX THE CROSSOVER CANCELLATION
         val isTextSelected = newSelStart != newSelEnd
 
-        if (isTextSelected) {
+        // Allow the menu to stay open if they pressed the Highlight button!
+        if (isTextSelected || isHighlighting) {
             if (currentPredictions != UTILITY_ACTIONS) {
                 currentPredictions = UTILITY_ACTIONS
                 predictionIndex = 0
@@ -959,6 +999,10 @@ class JoyTypeService : InputMethodService() {
             ic.commitText("", 1)
             ic.endBatchEdit()
         }, 200L) // 200ms allows standard Android window animations to finish
+
+        // Force the initial reactive draws on boot!
+        updateModeBadgeUI()
+        updateSelectionBadgeUI()
     }
 
     private fun executeAction(action: Action, isRepeat: Boolean = false) {
@@ -974,34 +1018,13 @@ class JoyTypeService : InputMethodService() {
                 saveUndoSnapshot()
                 fireActionHaptic()
 
-                // --- UTILITY INTERCEPT ---
                 if (currentPredictions == UTILITY_ACTIONS) {
                     executeUtilityCommand(currentPredictions[predictionIndex])
                     return
                 }
-
-                // --- MACRO INTERCEPT (V1) ---
                 if (currentMode == InputMode.MACRO) {
-                    val targetIndex = if (isRadialMenuOpen) radialSelectedIndex else predictionIndex
-
-                    if (macroLibrary.isNotEmpty() && targetIndex < macroLibrary.size) {
-                        val selectedMacro = macroLibrary[targetIndex]
-                        val ic = currentInputConnection ?: return
-                        
-                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                            for (keyCode in selectedMacro.sequence) {
-                                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-                                kotlinx.coroutines.delay(15) 
-                                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-                                kotlinx.coroutines.delay(30)
-                            }
-                        }
-                        
-                        // Collapse the radial menu visually if it was open
-                        isRadialMenuOpen = false
-                        updateUI() 
-                    }
-                    return // Exit ACCEPT early so we don't accidentally commit text!
+                    // ... (keep your existing Macro execution logic) ...
+                    return 
                 }
 
                 val now = System.currentTimeMillis()
@@ -1009,64 +1032,58 @@ class JoyTypeService : InputMethodService() {
 
                 if (currentPredictions.isNotEmpty()) {
                     if (currentMode == InputMode.T9) {
-                        // --- T9 MODE ---
                         var wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
-
-                        // If typing right up against punctuation, inject a space first.
                         if (autoSpace) {
                             val textBefore = ic.getTextBeforeCursor(1, 0)?.toString() ?: ""
                             val requiresPreSpace = listOf(".", ",", "?", "!", ":", ";", ")", "]", "}").contains(textBefore)
-                            if (requiresPreSpace) {
-                                wordToCommit = " $wordToCommit"
-                            }
+                            if (requiresPreSpace) wordToCommit = " $wordToCommit"
                         }
-
-                        ic.commitText(wordToCommit, 1)
-
-                        // Smart Auto-Space checks if a space or special character is already there!
+                        
+                        smartCommitText(wordToCommit)
+                        
                         if (autoSpace) {
                             val textAfter = ic.getTextAfterCursor(1, 0)?.toString() ?: ""
                             if (!textAfter.startsWith(" ") && !textAfter.startsWith(".") && !textAfter.startsWith(",")) {
-                                ic.commitText(" ", 1)
+                                smartCommitText(" ") 
                             }
                         }
                     } else {
-                        // --- MANUAL MODE ---
-                        // Absolute raw control. No capitalization, no spaces.
-                        ic.commitText(currentPredictions[predictionIndex], 1)
+                        smartCommitText(currentPredictions[predictionIndex])
                     }
                     
                     val wasT9 = currentMode == InputMode.T9
                     resetState()
-                    
-                    // Set the timestamp AFTER resetState() to guarantee it isn't accidentally cleared!
-                    if (wasT9) {
-                        lastAcceptTime = now 
-                    }
+                    if (wasT9) lastAcceptTime = now 
                 } else {
-                    // --- RESTING STATE (No active strokes) ---
-                    // Double Accept Period ONLY triggers in T9 Mode
+                    // --- EMULATOR-SAFE DOUBLE TAP ---
                     if (currentMode == InputMode.T9 && doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
-                        
-                        // THE FIX: Wrap in a Batch Edit so the deletion and period happen atomically!
-                        ic.beginBatchEdit()
                         val textBefore = ic.getTextBeforeCursor(10, 0)?.toString() ?: ""
-                        val spacesMatch = Regex("\\s+$").find(textBefore) 
+                        val spacesMatch = Regex("\\s+$").find(textBefore)
+                        
+                        ic.beginBatchEdit()
                         if (spacesMatch != null) {
-                            ic.deleteSurroundingText(spacesMatch.value.length, 0)
+                            val editorInfo = currentInputEditorInfo
+                            val requiresHardwareKeys = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
+                            
+                            if (requiresHardwareKeys) {
+                                // Emulators ignore software deletion, so spoof hardware backspaces!
+                                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                                    for (i in 0 until spacesMatch.value.length) {
+                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+                                        kotlinx.coroutines.delay(10)
+                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+                                    }
+                                }
+                            } else {
+                                ic.deleteSurroundingText(spacesMatch.value.length, 0)
+                            }
                         }
-                        ic.commitText(". ", 1)
+                        
+                        smartCommitText(". ")
                         ic.endBatchEdit()
-                        
-                        lastAcceptTime = 0L // Reset so a 3rd tap doesn't add another period
+                        lastAcceptTime = 0L 
                     } else {
-                        // Do NOT insert a phantom space!
-                        
-                        // THE CORE FIX: Even if we do nothing visually, we MUST record 
-                        // this tap's timestamp so the next tap knows it was a double-tap!
-                        if (currentMode == InputMode.T9) {
-                            lastAcceptTime = now
-                        }
+                        if (currentMode == InputMode.T9) lastAcceptTime = now
                     }
                 }
             }
@@ -1181,30 +1198,57 @@ class JoyTypeService : InputMethodService() {
                     updateUI()
                 }
             }
-            Action.ADD_SPACE -> {
+                        Action.ADD_SPACE -> {
                 saveUndoSnapshot()
                 fireActionHaptic()
 
-                // If text is highlighted, space deletes it and adds a space
                 if (currentPredictions == UTILITY_ACTIONS) {
-                    ic.commitText(" ", 1)
+                    smartCommitText(" ")
                     resetState()
                     return
                 }
 
+                val now = System.currentTimeMillis()
+                val ic = currentInputConnection ?: return
+
                 if (currentPredictions.isNotEmpty()) {
                     if (currentMode == InputMode.T9) {
                         val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
-                        ic.commitText(wordToCommit, 1)
-                        if (autoSpace) ic.commitText(" ", 1)
-                        lastAcceptTime = System.currentTimeMillis()
+                        smartCommitText(wordToCommit)
+                        if (autoSpace) smartCommitText(" ")
+                        lastAcceptTime = now
                     } else {
-                        // In Manual mode, just commit the raw char (and NO auto-space!)
-                        ic.commitText(currentPredictions[predictionIndex], 1)
+                        smartCommitText(currentPredictions[predictionIndex])
                     }
                     resetState()
                 } else {
-                    ic.commitText(" ", 1)
+                    // Mirrored the exact double-tap logic so Spacebar works flawlessly too!
+                    if (currentMode == InputMode.T9 && doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
+                        val textBefore = ic.getTextBeforeCursor(10, 0)?.toString() ?: ""
+                        val spacesMatch = Regex("\\s+$").find(textBefore)
+                        
+                        ic.beginBatchEdit()
+                        if (spacesMatch != null) {
+                            val editorInfo = currentInputEditorInfo
+                            if (editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL) {
+                                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                                    for (i in 0 until spacesMatch.value.length) {
+                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+                                        kotlinx.coroutines.delay(10)
+                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+                                    }
+                                }
+                            } else {
+                                ic.deleteSurroundingText(spacesMatch.value.length, 0)
+                            }
+                        }
+                        smartCommitText(". ")
+                        ic.endBatchEdit()
+                        lastAcceptTime = 0L
+                    } else {
+                        smartCommitText(" ")
+                        if (currentMode == InputMode.T9) lastAcceptTime = now
+                    }
                 }
             }
             Action.CLEAR_TEXT -> {
@@ -1423,10 +1467,16 @@ class JoyTypeService : InputMethodService() {
                     val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
                     highlightAnchorIndex = extracted?.selectionStart ?: 0
                     glideCursorIndex = highlightAnchorIndex
+                    
+                    // Force the utility menu open immediately, even with no selection
+                    currentPredictions = UTILITY_ACTIONS
+                    predictionIndex = 0
                 } else {
                     highlightAnchorIndex = -1
-                    // Collapse selection to current cursor to cancel
                     ic.setSelection(glideCursorIndex, glideCursorIndex) 
+                    if (currentPredictions == UTILITY_ACTIONS) {
+                        currentPredictions = emptyList()
+                    }
                 }
                 updateUI()
             }
@@ -1466,7 +1516,7 @@ class JoyTypeService : InputMethodService() {
         visualDebugView.clear()
         setRestingUI()  
         isRadialMenuOpen = false
-        isSpecialCharMode = false
+        radialDidMove = false
         radialPage = 0
         radialLastOctant = -1
         vibratedThisStroke = false
@@ -1488,65 +1538,39 @@ class JoyTypeService : InputMethodService() {
     }
 
     private fun updateUI() {
-        // --- MACRO OVERRIDE (V1 Flat List) ---
-        if (currentMode == InputMode.MACRO) {
-
-            // Safety check before touching the UI element!
-            if (::tvBreadcrumb.isInitialized) {
-                tvBreadcrumb.text = "MACROS" 
-            }
-            
-            // Draw the flat list exactly like normal predictions!
-            val display = if (isRadialMenuOpen) {
-                val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
-                macroLibrary.mapIndexed { index, macro ->
-                    val dir = if (index < arrows.size) "${arrows[index]} " else ""
-                    if (index == radialSelectedIndex) "<b>[<font color='#555555'>$dir</font><font color='#42A5F5'>${macro.name}</font><font color='#555555'>]</font></b>" 
-                    else "<font color='#555555'>$dir${macro.name}</font>"
-                }.joinToString("   ")
-            } else {
-                macroLibrary.mapIndexed { index, macro ->
-                    if (index == predictionIndex) "<b><font color='#42A5F5'>[${macro.name}]</font></b>" 
-                    else "<font color='#777777'>${macro.name}</font>" 
-                }.joinToString("   ")
-            }
-            
-            tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
-            return // IMPORTANT: Exit early so standard T9 UI logic doesn't run!
+        // 1. Structural Updates
+        if (currentMode == InputMode.MACRO && ::tvBreadcrumb.isInitialized) {
+            tvBreadcrumb.text = "MACROS"
         }
 
-        if (currentPredictions.isEmpty() && !isRadialMenuOpen) {
+        // 2. Resting State Check
+        if (currentPredictions.isEmpty() && !isRadialMenuOpen && currentMode != InputMode.MACRO) {
             setRestingUI(isComposingEmpty = wordProbabilities.isNotEmpty())
             return
         }
 
-        // If the code makes it past the 'return' above, it means the user 
-        // IS actively typing or has the radial menu open. Hide the badge
         tvModeBadge.visibility = View.GONE
         
-        // 1. Slice lists: Standard mode now ALSO caps at 8 words
-        val itemsToDraw = if (isRadialMenuOpen) {
-            if (isSpecialCharMode) {
-                val start = radialPage * 8
-                val end = kotlin.math.min(start + 8, SPECIAL_CHARS.size)
-                if (start < SPECIAL_CHARS.size) SPECIAL_CHARS.subList(start, end) else emptyList()
-            } else {
-                val start = radialPage * 8
-                val end = kotlin.math.min(start + 8, currentPredictions.size)
-                if (start < currentPredictions.size) currentPredictions.subList(start, end) else emptyList()
-            }
-        } else {
-            currentPredictions.take(8)
+        // 3. Gather Active Items using Source of Truth
+        val state = currentRadialState
+        val activeItems = when (state) {
+            RadialState.MACRO -> macroLibrary.map { it.name }
+            RadialState.SPECIAL_CHARS -> SPECIAL_CHARS
+            RadialState.UTILITY -> UTILITY_ACTIONS
+            RadialState.PREDICTIONS -> currentPredictions
         }
+        
+        val start = radialPage * 8
+        val end = kotlin.math.min(start + 8, activeItems.size)
+        val itemsToDraw = if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
 
-        // 2. Format the text
-        val isUtilityMode = currentPredictions == UTILITY_ACTIONS
-        val activeColor = if (isUtilityMode) "#FF6B6B" else "#D084FF" // Soft Red vs Soft Purple
+        val activeColor = if (state == RadialState.UTILITY) "#FF6B6B" else "#D084FF"
 
+        // 4. Draw the Bar
         val valDisplay = if (isRadialMenuOpen) {
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
             itemsToDraw.mapIndexed { index, word ->
-                val textToDraw = if (isSpecialCharMode) "  $word  " else word
+                val textToDraw = if (state == RadialState.SPECIAL_CHARS) "  $word  " else word
                 val dir = if (index < arrows.size) "${arrows[index]} " else ""
                 
                 if (index == radialSelectedIndex) {
@@ -1564,28 +1588,16 @@ class JoyTypeService : InputMethodService() {
 
         tvPredictions.text = android.text.Html.fromHtml(valDisplay, android.text.Html.FROM_HTML_MODE_LEGACY)
 
-        // We are typing, so hide the Mode Badge
-        tvModeBadge.visibility = View.GONE
-
-        // 3. Calculate and show the Pagination Badge if needed
-        if (isRadialMenuOpen) {
-            val maxPages = if (isSpecialCharMode) {
-                kotlin.math.ceil(SPECIAL_CHARS.size / 8.0).toInt()
-            } else {
-                kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
-            }
-            
-            if (maxPages > 1) {
-                tvPaginationBadge.text = "[${radialPage + 1}/$maxPages]"
-                tvPaginationBadge.visibility = View.VISIBLE
-            } else {
-                tvPaginationBadge.visibility = View.GONE
-            }
+        // 5. Pagination Badge
+        val maxPages = kotlin.math.ceil(activeItems.size / 8.0).toInt().coerceAtLeast(1)
+        if (isRadialMenuOpen && maxPages > 1) {
+            tvPaginationBadge.text = "[${radialPage + 1}/$maxPages]"
+            tvPaginationBadge.visibility = View.VISIBLE
         } else {
             tvPaginationBadge.visibility = View.GONE
         }
 
-        // 4. THE CRASH FIX: Capture state and use Try/Catch Failsafes
+        // 6. Scroll Offset Fix
         val capturedSelectedIndex = radialSelectedIndex
         val capturedItems = itemsToDraw.toList()
 
@@ -1600,15 +1612,11 @@ class JoyTypeService : InputMethodService() {
                     val fallbackIndex = plainText.indexOf(targetWord)
                     val actualIndex = if (charIndex >= 0) charIndex else fallbackIndex
                     
-                    // Explicitly check that the index is within the bounds of the CURRENT layout state
                     if (actualIndex >= 0 && actualIndex <= layout.text.length) {
                         try {
                             val xOffset = layout.getPrimaryHorizontal(actualIndex).toInt()
-                            // Add tvPredictions.left so the scroll offset knows where the text actually starts inside the LinearLayout!
                             hsvPredictions.smoothScrollTo(tvPredictions.left + xOffset - (hsvPredictions.width / 2), 0)
                         } catch (e: Exception) {
-                            // If Android's async layout engine desyncs during a hyper-fast spin,
-                            // silently catch it. It will self-correct on the very next frame!
                             e.printStackTrace()
                         }
                     }
@@ -1694,20 +1702,35 @@ class JoyTypeService : InputMethodService() {
         }
         tvPredictions.text = android.text.Html.fromHtml(baseText, android.text.Html.FROM_HTML_MODE_LEGACY)
         
-        // Hide pagination when resting!
+        // Hide pagination when resting
         tvPaginationBadge.visibility = View.GONE 
+
+        // Restore the Mode Badge when we finish typing and return to rest
+        if (::tvModeBadge.isInitialized) {
+            tvModeBadge.visibility = View.VISIBLE
+        }
     }
 
     private fun executeUtilityCommand(command: String) {
         val ic = currentInputConnection ?: return
+        var shouldCollapse = true
+
         when (command) {
-            "Cancel" -> { 
-                // Do nothing to the text/clipboard. Just fall through to cleanup.
-            }
+            "Cancel" -> { } // Will collapse and close below
             "Copy" -> ic.performContextMenuAction(android.R.id.copy)
-            "Paste" -> ic.performContextMenuAction(android.R.id.paste)
-            "Cut" -> ic.performContextMenuAction(android.R.id.cut)
-            "Select All" -> ic.performContextMenuAction(android.R.id.selectAll)
+            "Paste" -> {
+                ic.performContextMenuAction(android.R.id.paste)
+                shouldCollapse = false // Let the OS move the cursor
+            }
+            "Cut" -> {
+                ic.performContextMenuAction(android.R.id.cut)
+                shouldCollapse = false 
+            }
+            "Select All" -> {
+                ic.performContextMenuAction(android.R.id.selectAll)
+                isHighlighting = true // Ensure the badge stays active
+                return // Exit early so we DON'T collapse the new selection
+            }
             "Toggle Case" -> {
                 val selectedText = ic.getSelectedText(0)?.toString() ?: ""
                 if (selectedText.isNotEmpty()) {
@@ -1716,15 +1739,50 @@ class JoyTypeService : InputMethodService() {
                     } else {
                         selectedText.uppercase()
                     }
-                    ic.commitText(newText, 1) // This replaces the selection automatically
+                    ic.commitText(newText, 1)
+                    shouldCollapse = false // commitText moves cursor automatically
                 }
             }
         }
         
-        // Turn off highlight mode after a command
+        // Turn off highlight mode after a command finishes
         isHighlighting = false
-        val newCursorPos = ic.getExtractedText(ExtractedTextRequest(), 0)?.selectionEnd ?: glideCursorIndex
-        ic.setSelection(newCursorPos, newCursorPos) 
+        if (shouldCollapse) {
+            ic.setSelection(glideCursorIndex, glideCursorIndex) 
+        }
         resetState()
-    }   
+    }
+
+    private fun smartCommitText(textToCommit: String) {
+        val ic = currentInputConnection ?: return
+        val editorInfo = currentInputEditorInfo
+        
+        // 1. Detect if the app is an emulator/game asking for hardware keys
+        val requiresHardwareKeys = editorInfo == null || 
+                                   editorInfo.inputType == android.text.InputType.TYPE_NULL
+        
+        if (requiresHardwareKeys) {
+            // 2. THE GBOARD METHOD: Use Android's built-in translator!
+            val charMap = android.view.KeyCharacterMap.load(android.view.KeyCharacterMap.VIRTUAL_KEYBOARD)
+            val events = charMap.getEvents(textToCommit.toCharArray())
+            
+            if (events != null) {
+                // If it's a multi-character string (like a T9 word), we launch a coroutine 
+                // to add microscopic delays so the emulator's polling loop doesn't drop keys.
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                    for (event in events) {
+                        ic.sendKeyEvent(event)
+                        // 10ms is fast enough to feel instant, but slow enough for Winlator to catch it
+                        kotlinx.coroutines.delay(10) 
+                    }
+                }
+            } else {
+                // Failsafe: If the charMap fails (rare), try to brute-force a software commit anyway
+                ic.commitText(textToCommit, 1)
+            }
+        } else {
+            // 3. Normal App (Chrome, Discord, etc.) - Use standard software string injection
+            ic.commitText(textToCommit, 1)
+        }
+    }
 }

@@ -154,6 +154,11 @@ class SettingsActivity : AppCompatActivity() {
                 true
             }
 
+            findPreference<androidx.preference.Preference>("manage_macros")?.setOnPreferenceClickListener {
+                startActivity(android.content.Intent(requireContext(), MacroManagerActivity::class.java))
+                true
+            }
+            
             // Added key_mod_1 and key_mod_2 to the listenable list!
             val bindableKeys = listOf(
                 "key_mod_1", "key_mod_2", 
@@ -165,7 +170,7 @@ class SettingsActivity : AppCompatActivity() {
             for (key in allKeys) {
                 val pref = findPreference<Preference>(key)
 
-                val defaultKey = DefaultBindings.MAP[key] ?: -1
+                val defaultKey = (DefaultBindings.MAP[key] as? Int) ?: -1
                 val currentCode = prefs.getInt(key, defaultKey)
 
                 pref?.summary = if (currentCode != -1) "Bound to: ${getKeyName(currentCode)}" else "Unbound"

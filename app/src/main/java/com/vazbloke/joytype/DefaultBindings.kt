@@ -15,9 +15,11 @@ object DefaultBindings {
         "key_clear_text" to -1,
         "key_enter" to KeyEvent.KEYCODE_BUTTON_R2,
         "key_undo" to KeyEvent.KEYCODE_BUTTON_X,
-        
-        "key_redo" to KeyEvent.KEYCODE_BUTTON_X, // The physical button
-        "mod_redo" to "M1",                // The modifier string
+
+        "key_redo" to -1,
+
+        // "key_redo" to KeyEvent.KEYCODE_BUTTON_X, // The physical button
+        // "mod_redo" to "M1",                // The modifier string
 
         "key_close" to KeyEvent.KEYCODE_BUTTON_SELECT,
         "key_open_settings" to KeyEvent.KEYCODE_BUTTON_START,
@@ -27,6 +29,6 @@ object DefaultBindings {
         "key_cycle_back" to -1,
         "key_toggle_mode" to KeyEvent.KEYCODE_BUTTON_L2,
         "key_add_to_dict" to KeyEvent.KEYCODE_BUTTON_THUMBR,
-        "key_toggle_highlight" to KeyEvent.KEYCODE_BUTTON_THUMBL
+        "key_toggle_highlight" to KeyEvent.KEYCODE_BUTTON_THUMBL,
     )
 }

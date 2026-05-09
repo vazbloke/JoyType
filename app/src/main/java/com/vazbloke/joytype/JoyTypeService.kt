@@ -53,8 +53,12 @@ class JoyTypeService : InputMethodService() {
 
     private var currentPredictions = listOf<String>()
     private var predictionIndex = 0
-    private val undoStack = java.util.Stack<CharSequence>()
-    private val redoStack = java.util.Stack<CharSequence>()
+
+    // --- Undo/Redo State ---
+    private data class TextSnapshot(val text: CharSequence, val selectionStart: Int, val selectionEnd: Int)
+    
+    private val undoStack = java.util.Stack<TextSnapshot>()
+    private val redoStack = java.util.Stack<TextSnapshot>()
 
     // --- New Features State ---
     private var autoSpace = true
@@ -100,11 +104,48 @@ class JoyTypeService : InputMethodService() {
         ACCEPT, RECOMPOSE, BACKSPACE_WORD, BACKSPACE_STROKE, 
         ADD_SPACE, CLEAR_TEXT, UNDO, REDO, OPEN_SETTINGS, NONE, ENTER, 
         CLOSE_KEYBOARD, CURSOR_WORD_LEFT, CURSOR_WORD_RIGHT,
-        CYCLE_FWD, CYCLE_BACK, TOGGLE_MODE, ADD_TO_DICT, TOGGLE_HIGHLIGHT, CHEAT_MPKFA
+        CYCLE_FWD, CYCLE_BACK, TOGGLE_MODE, ADD_TO_DICT, TOGGLE_HIGHLIGHT
     }
 
-    enum class InputMode { T9, ABC } // NEW
+    enum class InputMode { T9, ABC, MACRO }
     private var currentMode = InputMode.T9
+        set(value) {
+            if (field != value) {
+                field = value
+                updateModeBadgeUI()
+            }
+        }
+    
+    private lateinit var llBreadcrumbBar: View
+    private lateinit var tvBreadcrumb: TextView
+
+    private var macroLibrary: List<MacroRepository.Macro> = emptyList()
+    
+    // REACTIVE SUBSCRIBER: Automatically called whenever 'currentMode' changes.
+    // Manages structural visibility (Badges, Macro Bar).
+    private fun updateModeBadgeUI() {
+        if (!::tvModeBadge.isInitialized) return
+        
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            when (currentMode) {
+                InputMode.T9 -> {
+                    tvModeBadge.text = "[T9]"
+                    tvModeBadge.visibility = View.VISIBLE
+                    if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.GONE
+                }
+                InputMode.ABC -> {
+                    tvModeBadge.text = "[ABC]"
+                    tvModeBadge.visibility = View.VISIBLE
+                    if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.GONE
+                }
+                InputMode.MACRO -> {
+                    tvModeBadge.text = "[MAC]"
+                    tvModeBadge.visibility = View.VISIBLE
+                    if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.VISIBLE
+                }
+            }
+        }
+    }
 
     // Modifier State
     private var isM1Held = false
@@ -146,9 +187,33 @@ class JoyTypeService : InputMethodService() {
 
     // --- Selection & Utility State ---
     private var isHighlighting = false
+        // PUB SUB
+        set(value) {
+            // Only fire the UI update if the state actually changed
+            if (field != value) {
+                field = value
+                updateSelectionBadgeUI()
+            }
+        }
     private var highlightAnchorIndex = -1
     private val UTILITY_ACTIONS = listOf("Cancel", "Copy", "Paste", "Cut", "Select All", "Toggle Case")
-    private lateinit var tvSelectionBadge: TextView // Add to your UI variables
+     // Add to your UI variables
+    private lateinit var tvSelectionBadge: TextView
+    // REACTIVE SUBSCRIBER: Automatically called whenever 'isHighlighting' changes.
+    private fun updateSelectionBadgeUI() {
+        // Failsafe in case state changes before the keyboard view is fully inflated
+        if (!::tvSelectionBadge.isInitialized) return
+        
+        // Ensure UI updates always happen on the main thread
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            tvSelectionBadge.text = if (isHighlighting) "[SEL]" else "[CUR]"
+            tvSelectionBadge.setTextColor(
+                if (isHighlighting) android.graphics.Color.parseColor("#FF6B6B") 
+                else android.graphics.Color.parseColor("#555555")
+            )
+        }
+    }
+    
 
     // --- Pair Input State ---
     private var pairInputMode = false
@@ -253,6 +318,8 @@ class JoyTypeService : InputMethodService() {
 
         repeatDelay = prefs.getInt("key_repeat_delay", 600).toLong()
 
+        macroLibrary = MacroRepository.loadMacros(prefs)
+
         pairInputMode = prefs.getBoolean("pair_input_mode", false)
 
         if (::visualDebugView.isInitialized) {
@@ -318,7 +385,6 @@ class JoyTypeService : InputMethodService() {
         bind(Action.ADD_TO_DICT, "key_add_to_dict", "mod_add_to_dict")
         // # TODO: Why bind to none below?
         bind(Action.TOGGLE_HIGHLIGHT, "key_toggle_highlight", "NONE") // Hardcode "NONE" since KeyBindingPreference handles the combo
-        bind(Action.CHEAT_MPKFA, "key_cheat_mpkfa", "mod_cheat_mpkfa")
     }
 
     override fun onCreateInputView(): View {
@@ -333,7 +399,9 @@ class JoyTypeService : InputMethodService() {
         // THE FIX: Hook up the scroll view so it doesn't crash!
         hsvPredictions = view.findViewById(R.id.hsv_predictions) 
 
-        
+        llBreadcrumbBar = view.findViewById(R.id.ll_breadcrumb_bar)
+        tvBreadcrumb = view.findViewById(R.id.tv_breadcrumb)
+
         visualDebugView.visibility = if (visualDebug) View.VISIBLE else View.GONE
         setRestingUI()
 
@@ -343,6 +411,10 @@ class JoyTypeService : InputMethodService() {
                 android.widget.Toast.makeText(this, "Flick joystick to start typing", android.widget.Toast.LENGTH_SHORT).show()
             }
         }
+
+        // Force the initial reactive draws on boot!
+        updateModeBadgeUI()
+        updateSelectionBadgeUI()
         
         return view
     }
@@ -902,10 +974,34 @@ class JoyTypeService : InputMethodService() {
                 saveUndoSnapshot()
                 fireActionHaptic()
 
-                // --- NEW: UTILITY INTERCEPT ---
+                // --- UTILITY INTERCEPT ---
                 if (currentPredictions == UTILITY_ACTIONS) {
                     executeUtilityCommand(currentPredictions[predictionIndex])
                     return
+                }
+
+                // --- MACRO INTERCEPT (V1) ---
+                if (currentMode == InputMode.MACRO) {
+                    val targetIndex = if (isRadialMenuOpen) radialSelectedIndex else predictionIndex
+
+                    if (macroLibrary.isNotEmpty() && targetIndex < macroLibrary.size) {
+                        val selectedMacro = macroLibrary[targetIndex]
+                        val ic = currentInputConnection ?: return
+                        
+                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                            for (keyCode in selectedMacro.sequence) {
+                                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+                                kotlinx.coroutines.delay(15) 
+                                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+                                kotlinx.coroutines.delay(30)
+                            }
+                        }
+                        
+                        // Collapse the radial menu visually if it was open
+                        isRadialMenuOpen = false
+                        updateUI() 
+                    }
+                    return // Exit ACCEPT early so we don't accidentally commit text!
                 }
 
                 val now = System.currentTimeMillis()
@@ -1035,13 +1131,12 @@ class JoyTypeService : InputMethodService() {
 
                 if (start < end) {
                     val targetWord = text.substring(start, end)
+                    val deleteEnd = kotlin.math.max(end, cursor)
 
-                    // THE FIX: Delete from the start of the word, to whichever is further right: 
-                    // The actual end of the word, or the cursor!
-                    val deleteEnd = max(end, cursor)
-                    
-                    ic.setSelection(start, deleteEnd)
-                    ic.commitText("", 1)
+                    // Delete mathematically without triggering the selection hijack
+                    val leftLen = cursor - start
+                    val rightLen = deleteEnd - cursor
+                    ic.deleteSurroundingText(leftLen, rightLen)
 
                     // 4. Reconstruct the active composing state
                     wordProbabilities.clear()
@@ -1071,8 +1166,7 @@ class JoyTypeService : InputMethodService() {
                     // Generate the predictions
                     currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
 
-                    // If the engine couldn't find the word (e.g., it was a weird password typed in ABC mode), 
-                    // force it to the very front of the prediction list so the UI doesn't collapse!
+                    // If the engine couldn't find the word
                     if (currentPredictions.isEmpty() || currentPredictions.none { it.equals(targetWord, ignoreCase = true) }) {
                         val newPredictions = currentPredictions.toMutableList()
                         newPredictions.add(0, targetWord)
@@ -1083,7 +1177,6 @@ class JoyTypeService : InputMethodService() {
                     val foundIndex = currentPredictions.indexOfFirst { it.equals(targetWord, ignoreCase = true) }
                     predictionIndex = if (foundIndex != -1) foundIndex else 0
                     
-                    // Ensure the radial menu is closed initially so they see the standard prediction bar                    
                     isRadialMenuOpen = false 
                     updateUI()
                 }
@@ -1126,12 +1219,39 @@ class JoyTypeService : InputMethodService() {
                     val ic = currentInputConnection ?: return
                     
                     // Save current state to Redo before we go back
-                    val currentText = ic.getExtractedText(ExtractedTextRequest(), 0)?.text
-                    if (currentText != null) redoStack.push(currentText)
+                    val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+                    if (extracted != null && extracted.text != null) {
+                        redoStack.push(TextSnapshot(extracted.text, extracted.selectionStart, extracted.selectionEnd))
+                    }
                     
                     val previousState = undoStack.pop()
+                    
+                    ic.beginBatchEdit()
                     ic.performContextMenuAction(android.R.id.selectAll)
-                    ic.commitText(previousState, 1)
+                    ic.commitText(previousState.text, 1)
+                    
+                    // Restore the exact cursor position
+                    ic.setSelection(previousState.selectionStart, previousState.selectionEnd)
+                    
+                    // Re-sync local cursor math to prevent jump glitches on next joystick flick
+                    glideCursorIndex = previousState.selectionEnd
+                    ic.endBatchEdit()
+
+                    // Nuke the active composing memory so the UI resets!
+                    resetState()
+
+                    // THE FIX: Re-evaluate if the restored state was a selection
+                    if (previousState.selectionStart != previousState.selectionEnd) {
+                        isHighlighting = true
+                        highlightAnchorIndex = previousState.selectionStart
+                        glideCursorIndex = previousState.selectionEnd
+                        currentPredictions = UTILITY_ACTIONS
+                        
+                        updateUI()
+                    } else {
+                        // Re-sync local cursor math for normal cursor
+                        glideCursorIndex = previousState.selectionEnd
+                    }
                 }
             }
             Action.REDO -> {
@@ -1140,12 +1260,39 @@ class JoyTypeService : InputMethodService() {
                     val ic = currentInputConnection ?: return
                     
                     // Save current state to Undo before we go forward
-                    val currentText = ic.getExtractedText(ExtractedTextRequest(), 0)?.text
-                    if (currentText != null) undoStack.push(currentText)
+                    val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+                    if (extracted != null && extracted.text != null) {
+                        undoStack.push(TextSnapshot(extracted.text, extracted.selectionStart, extracted.selectionEnd))
+                    }
                     
                     val nextState = redoStack.pop()
+                    
+                    ic.beginBatchEdit()
                     ic.performContextMenuAction(android.R.id.selectAll)
-                    ic.commitText(nextState, 1)
+                    ic.commitText(nextState.text, 1)
+                    
+                    // Restore the exact cursor position
+                    ic.setSelection(nextState.selectionStart, nextState.selectionEnd)
+                    
+                    // Re-sync local cursor math
+                    glideCursorIndex = nextState.selectionEnd
+                    ic.endBatchEdit()
+
+                    // Nuke the active composing memory so the UI resets!
+                    resetState()
+
+                    // THE FIX: Re-evaluate if the restored state was a selection
+                    if (nextState.selectionStart != nextState.selectionEnd) {
+                        isHighlighting = true
+                        highlightAnchorIndex = nextState.selectionStart
+                        glideCursorIndex = nextState.selectionEnd
+                        currentPredictions = UTILITY_ACTIONS
+                        
+                        updateUI()
+                    } else {
+                        // Re-sync local cursor math for normal cursor
+                        glideCursorIndex = nextState.selectionEnd
+                    }
                 }
             }
             Action.OPEN_SETTINGS -> {
@@ -1226,16 +1373,26 @@ class JoyTypeService : InputMethodService() {
                 }
             }
             Action.TOGGLE_MODE -> {
-                // THE FIX: Check if the user is actively typing a word
                 if (wordProbabilities.isNotEmpty()) {
                     android.widget.Toast.makeText(this, "Cannot switch mode mid-type", android.widget.Toast.LENGTH_SHORT).show()
-                    // Optional: Play the "Thud" haptic so they feel the rejection!
                     haptics.thud() 
                     return
                 }
 
                 fireActionHaptic()
-                currentMode = if (currentMode == InputMode.T9) InputMode.ABC else InputMode.T9
+                
+                // Cycle through the modes
+                currentMode = when (currentMode) {
+                    InputMode.T9 -> InputMode.ABC
+                    InputMode.ABC -> InputMode.MACRO
+                    InputMode.MACRO -> InputMode.T9
+                }
+                
+                // Reset scroll position when entering the mode
+                if (currentMode == InputMode.MACRO) {
+                    predictionIndex = 0
+                }
+                
                 resetState() 
                 updateUI()
             }
@@ -1273,45 +1430,20 @@ class JoyTypeService : InputMethodService() {
                 }
                 updateUI()
             }
-            Action.CHEAT_MPKFA -> {
-                fireActionHaptic()
-                val ic = currentInputConnection ?: return
-                
-                // The explicit hardware keycodes for M-P-K-F-A
-                val cheatSequence = listOf(
-                    KeyEvent.KEYCODE_M,
-                    KeyEvent.KEYCODE_P,
-                    KeyEvent.KEYCODE_K,
-                    KeyEvent.KEYCODE_F,
-                    KeyEvent.KEYCODE_A
-                )
-
-                // Launch a quick coroutine to simulate human typing
-                CoroutineScope(Dispatchers.Main).launch {
-                    for (keyCode in cheatSequence) {
-                        // 1. Press the key down
-                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-                        
-                        // 2. Hold it for 30ms (gives Winlator time to register the state change)
-                        delay(30) 
-                        
-                        // 3. Release the key
-                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-                        
-                        // 4. Wait 50ms before pressing the next key
-                        delay(50)
-                    }
-                }
-            }
             Action.NONE -> {}
         }
     }
 
     private fun saveUndoSnapshot() {
         val ic = currentInputConnection ?: return
-        val currentText = ic.getExtractedText(ExtractedTextRequest(), 0)?.text
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return
+        
+        val currentText = extracted.text
+        val selStart = extracted.selectionStart
+        val selEnd = extracted.selectionEnd
+        
         if (currentText != null) {
-            undoStack.push(currentText)
+            undoStack.push(TextSnapshot(currentText, selStart, selEnd))
             if (undoStack.size > 20) undoStack.removeAt(0)
             
             redoStack.clear() // Any new typing breaks the Redo timeline
@@ -1353,15 +1485,35 @@ class JoyTypeService : InputMethodService() {
 
         isHighlighting = false
         highlightAnchorIndex = -1
-        if (::tvSelectionBadge.isInitialized) {
-            tvSelectionBadge.text = "[CUR]"
-            tvSelectionBadge.setTextColor(android.graphics.Color.parseColor("#555555"))
-        }
     }
 
     private fun updateUI() {
-        tvSelectionBadge.text = if (isHighlighting) "[SEL]" else "[CUR]"
-        tvSelectionBadge.setTextColor(if (isHighlighting) android.graphics.Color.parseColor("#FF6B6B") else android.graphics.Color.parseColor("#555555"))
+        // --- MACRO OVERRIDE (V1 Flat List) ---
+        if (currentMode == InputMode.MACRO) {
+
+            // Safety check before touching the UI element!
+            if (::tvBreadcrumb.isInitialized) {
+                tvBreadcrumb.text = "MACROS" 
+            }
+            
+            // Draw the flat list exactly like normal predictions!
+            val display = if (isRadialMenuOpen) {
+                val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
+                macroLibrary.mapIndexed { index, macro ->
+                    val dir = if (index < arrows.size) "${arrows[index]} " else ""
+                    if (index == radialSelectedIndex) "<b>[<font color='#555555'>$dir</font><font color='#42A5F5'>${macro.name}</font><font color='#555555'>]</font></b>" 
+                    else "<font color='#555555'>$dir${macro.name}</font>"
+                }.joinToString("   ")
+            } else {
+                macroLibrary.mapIndexed { index, macro ->
+                    if (index == predictionIndex) "<b><font color='#42A5F5'>[${macro.name}]</font></b>" 
+                    else "<font color='#777777'>${macro.name}</font>" 
+                }.joinToString("   ")
+            }
+            
+            tvPredictions.text = android.text.Html.fromHtml(display, android.text.Html.FROM_HTML_MODE_LEGACY)
+            return // IMPORTANT: Exit early so standard T9 UI logic doesn't run!
+        }
 
         if (currentPredictions.isEmpty() && !isRadialMenuOpen) {
             setRestingUI(isComposingEmpty = wordProbabilities.isNotEmpty())
@@ -1541,9 +1693,6 @@ class JoyTypeService : InputMethodService() {
             "..."
         }
         tvPredictions.text = android.text.Html.fromHtml(baseText, android.text.Html.FROM_HTML_MODE_LEGACY)
-        
-        tvModeBadge.text = if (currentMode == InputMode.T9) "[T9]" else "[ABC]"
-        tvModeBadge.visibility = View.VISIBLE
         
         // Hide pagination when resting!
         tvPaginationBadge.visibility = View.GONE 

@@ -34,7 +34,6 @@ class JoyTypeService : InputMethodService() {
     
     // --- Radial UI State ---
     private var isRadialMenuOpen = false
-    private var radialSelectedIndex = 0
     enum class RadialState { MACRO, UTILITY, PREDICTIONS, SPECIAL_CHARS }
 
     private val currentRadialState: RadialState
@@ -46,10 +45,6 @@ class JoyTypeService : InputMethodService() {
             return RadialState.SPECIAL_CHARS
         }
     private var radialDidMove = false
-
-    // NEW: Pagination State
-    private var radialPage = 0 
-    private var radialLastOctant = -1
     
     // Master Special character List (32 Symbols = 4 Pages)
     private val SPECIAL_CHARS = listOf(
@@ -208,10 +203,6 @@ class JoyTypeService : InputMethodService() {
         '7' to PointF(-1f, 1f),  '8' to PointF(0f, 1f),  '9' to PointF(1f, 1f)
     )
 
-    // Clickwheel
-    private var isPeggedAtStart = false
-    private var isPeggedAtEnd = false
-
     // --- Key Repeat State ---
     private var repeatDelay = 600L
     private val repeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -327,6 +318,18 @@ class JoyTypeService : InputMethodService() {
             cursorHandler.postDelayed(this, delay.coerceAtLeast(40L))
         }
     }
+
+    private val radialEngine = RadialWheelEngine(object : RadialWheelEngine.RadialWheelListener {
+        override fun onIndexChanged(newIndex: Int, page: Int) {
+            updateUI() // Redraw the screen when the selection changes!
+        }
+        override fun onTick() {
+            haptics.tick()
+        }
+        override fun onThud() {
+            haptics.thud()
+        }
+    })
 
     private fun loadSettings() {
         autoSpace = prefs.getBoolean("autospace_after_accept", true)
@@ -471,106 +474,17 @@ class JoyTypeService : InputMethodService() {
             if (isRadialMenuOpen) {
                 if (mag > 0.3f) {
                     radialDidMove = true
-
-                    var angle = atan2(y.toDouble(), x.toDouble()) 
-                    angle += Math.PI / 2.0 
-                    if (angle < 0) angle += 2 * Math.PI
-
-                    val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
-                    val maxPages = when(currentRadialState) {
-                        RadialState.MACRO -> kotlin.math.ceil(macroLibrary.size / 8.0).toInt()
-                        RadialState.SPECIAL_CHARS -> kotlin.math.ceil(SPECIAL_CHARS.size / 8.0).toInt()
-                        RadialState.UTILITY -> 1
-                        RadialState.PREDICTIONS -> kotlin.math.ceil(currentPredictions.size / 8.0).toInt().coerceAtLeast(1)
-                    }
-
-                    if (radialLastOctant != -1 && octant != radialLastOctant) {
-                        
-                        // THE FIX: Calculate physical rotation direction
-                        var delta = octant - radialLastOctant
-                        if (delta > 4) delta -= 8
-                        if (delta < -4) delta += 8
-                        
-                        val isMovingForward = delta > 0 // Clockwise
-                        val isMovingBackward = delta < 0 // Counter-Clockwise
-                        var justPegged = false
-
-                        // Clockwise crossover (7 to 0)
-                        if (radialLastOctant == 7 && octant == 0) {
-                            if (isPeggedAtStart) {
-                                isPeggedAtStart = false 
-                                haptics.tick() // Tick on unpeg (7->0 retreat!)
-                            } else if (radialPage < maxPages - 1) {
-                                radialPage++
-                            } else if (!isPeggedAtEnd) {
-                                isPeggedAtEnd = true
-                                justPegged = true
-                                haptics.thud() // Initial THUNK!
-                            }
-                        }
-                        // Counter-Clockwise crossover (0 to 7)
-                        else if (radialLastOctant == 0 && octant == 7) {
-                            if (isPeggedAtEnd) {
-                                isPeggedAtEnd = false 
-                                haptics.tick() // Tick on unpeg (0->7 retreat!)
-                            } else if (radialPage > 0) {
-                                radialPage--
-                            } else if (!isPeggedAtStart) {
-                                isPeggedAtStart = true
-                                justPegged = true
-                                haptics.thud() // Initial THUNK!
-                            }
-                        }
-
-                        // THE DIRECTIONAL GRINDING GEAR:
-                        if (!justPegged) {
-                            if (isPeggedAtStart) {
-                                // If we are pegged at 0, moving backward (7, 6, 5) thuds. Moving forward (5, 6, 7) ticks!
-                                if (isMovingBackward) haptics.thud() else haptics.tick()
-                            } else if (isPeggedAtEnd) {
-                                // If we are pegged at Max, moving forward thuds. Moving backward ticks!
-                                if (isMovingForward) haptics.thud() else haptics.tick()
-                            }
-                        }
-                    }
-
-                    radialLastOctant = octant
-
-                    val activeItems = when(currentRadialState) {
-                        RadialState.MACRO -> macroLibrary
-                        RadialState.SPECIAL_CHARS -> SPECIAL_CHARS
-                        RadialState.UTILITY -> UTILITY_ACTIONS
-                        RadialState.PREDICTIONS -> currentPredictions
-                    }
-                    val start = radialPage * 8
-                    val end = kotlin.math.min(start + 8, activeItems.size)
-                    val currentItems = if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
-
-                    if (currentItems.isNotEmpty()) {
-                        // Lock the visual selection if pegged against a wall
-                        val newIndex = if (isPeggedAtStart) {
-                            0
-                        } else if (isPeggedAtEnd) {
-                            currentItems.size - 1
-                        } else {
-                            octant.coerceAtMost(currentItems.size - 1)
-                        }
-
-                        if (newIndex != radialSelectedIndex) {
-                            radialSelectedIndex = newIndex
-                            // Only tick for normal valid scrolling (unpegged)
-                            if (!isPeggedAtStart && !isPeggedAtEnd) {
-                                haptics.tick()
-                            }
-                        }
-                        updateUI()
-                    }
-                } else {
-                    // Stick released -> Reset scroll states completely
-                    radialLastOctant = -1
-                    isPeggedAtStart = false
-                    isPeggedAtEnd = false
                 }
+                
+                // Route the input to the engine based on our Source of Truth
+                val activeItemsCount = when(currentRadialState) {
+                    RadialState.MACRO -> macroLibrary.size
+                    RadialState.SPECIAL_CHARS -> SPECIAL_CHARS.size
+                    RadialState.UTILITY -> UTILITY_ACTIONS.size
+                    RadialState.PREDICTIONS -> currentPredictions.size
+                }
+                
+                radialEngine.updateInput(x, y, mag, activeItemsCount)
                 return true
             }
 
@@ -661,9 +575,7 @@ class JoyTypeService : InputMethodService() {
         if (targetRadialKey != -1 && keyCode == targetRadialKey) {
             isRadialMenuOpen = true
             radialDidMove = false
-            radialSelectedIndex = 0
-            radialPage = 0
-            radialLastOctant = -1
+            radialEngine.reset()
             
             tvPredictions.animate().cancel() 
             tvPredictions.alpha = 0f
@@ -753,7 +665,7 @@ class JoyTypeService : InputMethodService() {
 
                 // THE SAFETY CATCH: Only execute if they actively flicked the stick!
                 if (radialDidMove) {
-                    val actualIndex = (radialPage * 8) + radialSelectedIndex
+                    val actualIndex = (radialEngine.radialPage * 8) + radialEngine.radialSelectedIndex
                     val ic = currentInputConnection
                     
                     when (currentRadialState) {
@@ -1059,7 +971,7 @@ class JoyTypeService : InputMethodService() {
 
                 // --- MACRO INTERCEPT ---
                 if (currentMode == InputMode.MACRO) {
-                    val targetIndex = if (isRadialMenuOpen) radialSelectedIndex else predictionIndex
+                    val targetIndex = if (isRadialMenuOpen) radialEngine.radialSelectedIndex else predictionIndex
 
                     if (macroLibrary.isNotEmpty() && targetIndex < macroLibrary.size) {
                         val selectedMacro = macroLibrary[targetIndex]
@@ -1556,17 +1468,16 @@ class JoyTypeService : InputMethodService() {
         predictionIndex = 0
         visualDebugView.clear()
         setRestingUI()  
+
         isRadialMenuOpen = false
         radialDidMove = false
-        radialPage = 0
-        radialLastOctant = -1
+        radialEngine.reset()
         vibratedThisStroke = false
-        isPeggedAtStart = false
-        isPeggedAtEnd = false
+
         lastMag = 0f
         isDescending = false
 
-        // NEW: Reset Pair Input State!
+        // Pair Input State
         peakPt = null
         peakMag = 0f
         inValley = false
@@ -1601,7 +1512,7 @@ class JoyTypeService : InputMethodService() {
             RadialState.PREDICTIONS -> currentPredictions
         }
         
-        val start = radialPage * 8
+        val start = radialEngine.radialPage * 8
         val end = kotlin.math.min(start + 8, activeItems.size)
         val itemsToDraw = if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
 
@@ -1620,7 +1531,7 @@ class JoyTypeService : InputMethodService() {
                 val textToDraw = if (state == RadialState.SPECIAL_CHARS) "  $word  " else word
                 val dir = if (index < arrows.size) "${arrows[index]} " else ""
                 
-                if (index == radialSelectedIndex) {
+                if (index == radialEngine.radialSelectedIndex) {
                     "<b>[<font color='#555555'>$dir</font><font color='$activeColor'>$textToDraw</font><font color='#555555'>]</font></b>" 
                 } else {
                     "<font color='#555555'>$dir$textToDraw</font>"
@@ -1638,14 +1549,14 @@ class JoyTypeService : InputMethodService() {
         // 5. Pagination Badge
         val maxPages = kotlin.math.ceil(activeItems.size / 8.0).toInt().coerceAtLeast(1)
         if (isRadialMenuOpen && maxPages > 1) {
-            tvPaginationBadge.text = "[${radialPage + 1}/$maxPages]"
+            tvPaginationBadge.text = "[${radialEngine.radialPage + 1}/$maxPages]"
             tvPaginationBadge.visibility = View.VISIBLE
         } else {
             tvPaginationBadge.visibility = View.GONE
         }
 
         // 6. Scroll Offset Fix
-        val capturedSelectedIndex = radialSelectedIndex
+        val capturedSelectedIndex = radialEngine.radialSelectedIndex
         val capturedItems = itemsToDraw.toList()
 
         if (isRadialMenuOpen && capturedItems.isNotEmpty()) {

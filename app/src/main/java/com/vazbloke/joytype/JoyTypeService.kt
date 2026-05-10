@@ -113,7 +113,7 @@ class JoyTypeService : InputMethodService() {
     enum class Action(val xmlName: String, val defaultKey: Int, val defaultMod: ModifierKey) {
         ACCEPT("accept", KeyEvent.KEYCODE_BUTTON_R1, ModifierKey.NONE),
         RECOMPOSE("recompose", KeyEvent.KEYCODE_BUTTON_L1, ModifierKey.NONE),
-        BACKSPACE_WORD("backspace_word", KeyEvent.KEYCODE_BUTTON_Y, ModifierKey.NONE),
+        BACKSPACE_WORD("backspace_word", KeyEvent.KEYCODE_BUTTON_B, ModifierKey.M1),
         BACKSPACE_STROKE("backspace_stroke", KeyEvent.KEYCODE_BUTTON_B, ModifierKey.NONE),
         ADD_SPACE("add_space", KeyEvent.KEYCODE_BUTTON_A, ModifierKey.NONE),
         CLEAR_TEXT("clear_text", -1, ModifierKey.NONE),
@@ -156,23 +156,36 @@ class JoyTypeService : InputMethodService() {
         
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             when (currentMode) {
-                InputMode.T9 -> {
-                    tvModeBadge.text = "[T9]"
+                InputMode.T9, InputMode.ABC -> {
+                    tvModeBadge.text = if (currentMode == InputMode.T9) "[T9]" else "[ABC]"
                     tvModeBadge.setTextColor(android.graphics.Color.parseColor("#555555"))
                     tvModeBadge.visibility = View.VISIBLE
-                    if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.GONE
-                }
-                InputMode.ABC -> {
-                    tvModeBadge.text = "[ABC]"
-                    tvModeBadge.setTextColor(android.graphics.Color.parseColor("#555555"))
-                    tvModeBadge.visibility = View.VISIBLE
-                    if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.GONE
+                    
+                    if (::llBreadcrumbBar.isInitialized && llBreadcrumbBar.visibility == View.VISIBLE) {
+                        llBreadcrumbBar.animate().alpha(0f).translationY(-20f).setDuration(150).withEndAction {
+                            llBreadcrumbBar.visibility = View.GONE
+                        }.start()
+                    }
                 }
                 InputMode.MACRO -> {
                     tvModeBadge.text = "[MAC]"
-                    tvModeBadge.setTextColor(android.graphics.Color.parseColor("#E6C229"))
+                    tvModeBadge.setTextColor(android.graphics.Color.parseColor("#E6C229")) // Amber
                     tvModeBadge.visibility = View.VISIBLE
-                    if (::llBreadcrumbBar.isInitialized) llBreadcrumbBar.visibility = View.VISIBLE
+                    
+                    // Only show the bar if we are actually deep inside a folder structure
+                    // (Currently flat, so it stays hidden. When you add folders, it will animate
+                    val hasSubfolders = false // Change this to macroPathStack.size > 1 when folders are added
+                    
+                    if (::llBreadcrumbBar.isInitialized) {
+                        if (hasSubfolders) {
+                            llBreadcrumbBar.translationY = -20f
+                            llBreadcrumbBar.alpha = 0f
+                            llBreadcrumbBar.visibility = View.VISIBLE
+                            llBreadcrumbBar.animate().alpha(1f).translationY(0f).setDuration(200).start()
+                        } else {
+                            llBreadcrumbBar.visibility = View.GONE
+                        }
+                    }
                 }
             }
         }
@@ -227,7 +240,7 @@ class JoyTypeService : InputMethodService() {
             }
         }
     private var highlightAnchorIndex = -1
-    private val UTILITY_ACTIONS = listOf("Cancel", "Copy", "Paste", "Cut", "Select All", "Toggle Case")
+    private val UTILITY_ACTIONS = listOf("Cancel", "Copy", "Paste", "Cut", "Select Word", "Select All")
      // Add to your UI variables
     private lateinit var tvSelectionBadge: TextView
     // REACTIVE SUBSCRIBER: Automatically called whenever 'isHighlighting' changes.
@@ -245,7 +258,6 @@ class JoyTypeService : InputMethodService() {
         }
     }
     
-
     // --- Pair Input State ---
     private var pairInputMode = false
     private var peakPt: PointF? = null
@@ -262,73 +274,58 @@ class JoyTypeService : InputMethodService() {
             val ic = currentInputConnection ?: return
             
             val delay = 200L - (cursorMag * 160L).toLong()
+            val isHorizontal = abs(cursorX) > abs(cursorY)
             
-            if (abs(cursorX) > abs(cursorY)) {
-                // HORIZONTAL MOVEMENT: Use mathematically pure IMS selection
-                if (cursorX > 0) {
-                    if (glideCursorIndex < glideTextLength) glideCursorIndex++
-                } else {
-                    if (glideCursorIndex > 0) glideCursorIndex--
-                }
-                // Force the cursor to our exact calculated index, bypassing hardware key listeners!
-                // Fixed: Lock the text box state so Chrome can't hijack the cursor mid-move!
-                ic.beginBatchEdit()
+            val editorInfo = currentInputEditorInfo
+            val requiresHardwareKeys = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
 
-                if (isHighlighting && highlightAnchorIndex != -1) {
-                    // Some apps silently reject backwards ranges. Always pass the smaller index first!
-                    // Drag the selection box
-                    ic.setSelection(highlightAnchorIndex, glideCursorIndex)
+            if (requiresHardwareKeys) {
+                // --- EMULATOR MODE: Spoof Hardware Keys ---
+                val code = if (isHorizontal) {
+                    if (cursorX > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
                 } else {
-                    ic.setSelection(glideCursorIndex, glideCursorIndex)
+                    if (cursorY > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP
                 }
 
-                ic.endBatchEdit()
-            } else {
-                // VERTICAL MOVEMENT: We still must use DPAD here. 
-                // Software keyboards cannot know where visual line breaks occur on the screen, 
-                // so we have to rely on Android's native vertical text navigation.
-                if (cursorY > 0) {
-                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN))
-                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_DOWN))
-                } else {
-                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP))
-                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_UP))
-                }
+                // If selecting text, we must physically hold SHIFT while moving the D-Pad!
+                if (isHighlighting) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT))
                 
-                // Re-sync our local tracker just in case the DPAD vertical move changed our index
-                val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
-                glideCursorIndex = extracted?.selectionStart ?: glideCursorIndex
+                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+                
+                if (isHighlighting) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT))
+                
+            } else {
+                // --- STANDARD ANDROID MODE: Software Math ---
+                if (isHorizontal) {
+                    if (cursorX > 0) {
+                        if (glideCursorIndex < glideTextLength) glideCursorIndex++
+                    } else {
+                        if (glideCursorIndex > 0) glideCursorIndex--
+                    }
+                    ic.beginBatchEdit()
+                    if (isHighlighting && highlightAnchorIndex != -1) {
+                        ic.setSelection(highlightAnchorIndex, glideCursorIndex)
+                    } else {
+                        ic.setSelection(glideCursorIndex, glideCursorIndex)
+                    }
+                    ic.endBatchEdit()
+                } else {
+                    // Vertical software requires standard D-PAD
+                    val code = if (cursorY > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP
+                    if (isHighlighting) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT))
+                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+                    if (isHighlighting) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT))
+                    
+                    val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+                    glideCursorIndex = extracted?.selectionEnd ?: glideCursorIndex
+                }
             }
             
             haptics.tick() 
             cursorHandler.postDelayed(this, delay.coerceAtLeast(40L))
         }
-    }
-
-    override fun onCreate() {
-        super.onCreate()
-        haptics = HapticManager(this)
-        prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        t9Engine.loadDictionary(this)
-        loadSettings()
-
-        // Register the receiver
-        val filter = android.content.IntentFilter("com.vazbloke.joytype.RELOAD_DICT")
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(dictReloadReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(dictReloadReceiver, filter)
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        unregisterReceiver(dictReloadReceiver)
-    }
-
-    override fun onWindowShown() {
-        super.onWindowShown()
-        loadSettings()
     }
 
     private fun loadSettings() {
@@ -395,7 +392,32 @@ class JoyTypeService : InputMethodService() {
                 keyBindings[KeyCombo(keyCode, mod)] = action
             }
         }
+    }
 
+    override fun onCreate() {
+        super.onCreate()
+        haptics = HapticManager(this)
+        prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        t9Engine.loadDictionary(this)
+        loadSettings()
+
+        // Register the receiver
+        val filter = android.content.IntentFilter("com.vazbloke.joytype.RELOAD_DICT")
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(dictReloadReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(dictReloadReceiver, filter)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(dictReloadReceiver)
+    }
+
+    override fun onWindowShown() {
+        super.onWindowShown()
+        loadSettings()
     }
 
     override fun onCreateInputView(): View {
@@ -614,149 +636,6 @@ class JoyTypeService : InputMethodService() {
         return super.onGenericMotionEvent(event)
     }
 
-    private fun handleStrokeInput(rawX: Float, rawY: Float, mag: Float) {
-        val mapped = mapCircleToSquare(rawX, rawY)
-
-        // UX Polish: Clear the debug canvas ONLY when a brand new physical flick begins
-        if (mag > 0.1f && currentStrokePath.isEmpty()) {
-            registeredDebugPeaks.clear()
-            lastDetectionType = ""
-        }
-
-        if (mag > 0.5f && !vibratedThisStroke) {
-            vibratedThisStroke = true
-            haptics.click() 
-        }
-
-        // --- PAIR INPUT MODE (Dual-Heuristic Detection) ---
-        if (pairInputMode && currentStrokePath.isNotEmpty()) {
-            
-            if (peakPt == null || mag > peakMag) {
-                peakPt = PointF(mapped.x, mapped.y)
-                peakMag = mag
-            }
-
-            var triggeredPair = false
-
-            // Heuristic A: The Diagonal Slice (Valley)
-            // TIGHTENED: Require a deeper drop (-0.4f instead of -0.25f) to prove they truly crossed the center
-            if (mag < peakMag - 0.4f) { 
-                inValley = true 
-            // TIGHTENED: Require a stronger push out of the valley (> 0.45f instead of > 0.3f)
-            } else if (inValley && mag > lastMag + 0.05f && mag > 0.45f) {
-                triggeredPair = true 
-                lastDetectionType = "Diagonal-slice"
-            }
-
-            // Heuristic B: The Rim-Roll
-            if (!triggeredPair && peakPt != null && peakMag > 0.6f) { // TIGHTENED: Peak must be stronger
-                val distFromPeak = getDistance(peakPt!!, mapped.x, mapped.y)
-                // TIGHTENED: Require a massive distance change (> 0.85f instead of > 0.7f) 
-                // AND demand they stay pinned hard against the outer edge (> 0.6f instead of > 0.4f)
-                if (distFromPeak > 0.85f && mag > 0.6f) {
-                    triggeredPair = true 
-                    lastDetectionType = "Rim-roll" 
-                }
-            }
-
-            if (triggeredPair && peakPt != null) {
-                wordProbabilities.add(generateProbabilityMap(peakPt!!))
-                registeredDebugPeaks.add(PointF(peakPt!!.x, peakPt!!.y)) // SAVE THE PEAK!
-                updateLivePredictions()
-                
-                vibratedThisStroke = false 
-                haptics.tick()
-                
-                currentStrokePath.clear()
-                currentStrokePath.add(PointF(mapped.x, mapped.y))
-                peakPt = null
-                peakMag = 0f
-                inValley = false
-                lastMag = mag
-                
-                // Update debug view immediately to show the glowing point mid-flick
-                visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
-                return
-            }
-        }
-        
-        lastMag = mag
-        // ----------------------------------------------
-
-        // Notice we changed this from 0.0f to 0.1f to enforce the hardware deadzone safety!
-        if (mag < 0.1f) {
-            vibratedThisStroke = false 
-            peakPt = null
-            peakMag = 0f
-            inValley = false
-            lastMag = 0f
-
-            if (currentStrokePath.isNotEmpty()) {
-                val maxPt = currentStrokePath.maxByOrNull { sqrt(it.x * it.x + it.y * it.y) }
-                if (maxPt != null && sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
-                    
-                    if (currentMode == InputMode.T9) {
-                        // --- NORMAL PREDICTIVE MODE ---
-                        wordProbabilities.add(generateProbabilityMap(maxPt))
-                        registeredDebugPeaks.add(maxPt) 
-                        if (lastDetectionType.isEmpty()) lastDetectionType = "Normal flick" 
-                        updateLivePredictions()
-                    } else {
-                        // --- MANUAL ABC MODE ---
-                        val digitMap = generateProbabilityMap(maxPt)
-                        
-                        // THE FIX: Sort by probability to grab the winner AND the runner-up!
-                        val sortedDigits = digitMap.entries.sortedByDescending { it.value }
-                        val winningDigit = sortedDigits.getOrNull(0)?.key ?: '5'
-                        val runnerUpDigit = sortedDigits.getOrNull(1)?.key
-                        
-                        val chars = mutableListOf<String>()
-                        
-                        // Helper lambda to format and inject a digit's characters
-                        val injectChars = { targetDigit: Char ->
-                            val baseChars = t9Engine.getCharsForDigit(targetDigit)
-                            chars.addAll(baseChars.map { it.toString() })
-                            chars.addAll(baseChars.map { it.uppercaseChar().toString() })
-                            chars.add(targetDigit.toString())
-                        }
-                        
-                        // 1. Inject the primary intended digit
-                        injectChars(winningDigit)
-                        
-                        // 2. Inject the runner-up digit (in case their angle was slightly off)
-                        if (runnerUpDigit != null) {
-                            injectChars(runnerUpDigit)
-                        }
-                        
-                        currentPredictions = chars
-                        predictionIndex = 0
-                        isRadialMenuOpen = false 
-                        
-                        lastDetectionType = "Manual Entry"
-                    }
-                }
-                currentStrokePath.clear()
-                updateUI()
-                visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
-            }
-            return
-        }
-
-        currentStrokePath.add(PointF(mapped.x, mapped.y))
-        visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
-    }
-
-    private fun updateLivePredictions() {
-        if (wordProbabilities.isNotEmpty()) {
-            currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
-            predictionIndex = 0
-            updateUI()
-        } else {
-            currentPredictions = emptyList()
-            updateUI()
-        }
-    }
-
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (!isInputViewShown) return super.onKeyDown(keyCode, event)
 
@@ -881,13 +760,23 @@ class JoyTypeService : InputMethodService() {
                         RadialState.MACRO -> {
                             if (actualIndex < macroLibrary.size) {
                                 val selectedMacro = macroLibrary[actualIndex]
-                                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                                    for (code in selectedMacro.sequence) {
-                                        ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
-                                        kotlinx.coroutines.delay(15)
-                                        ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
-                                        kotlinx.coroutines.delay(30)
+                                val ic = currentInputConnection
+                                
+                                when (selectedMacro) {
+                                    is MacroRepository.Macro.Keystroke -> {
+                                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                                            for (code in selectedMacro.sequence) {
+                                                ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+                                                kotlinx.coroutines.delay(15)
+                                                ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+                                                kotlinx.coroutines.delay(30)
+                                            }
+                                        }
                                     }
+                                    is MacroRepository.Macro.Pasteboard -> {
+                                        if (selectedMacro.text.isNotEmpty()) smartCommitText(selectedMacro.text)
+                                    }
+                                    is MacroRepository.Macro.LuaScript -> { /* Lua handling later */ }
                                 }
                             }
                         }
@@ -1005,6 +894,151 @@ class JoyTypeService : InputMethodService() {
         updateSelectionBadgeUI()
     }
 
+    private fun handleStrokeInput(rawX: Float, rawY: Float, mag: Float) {
+        val mapped = mapCircleToSquare(rawX, rawY)
+
+        // UX Polish: Clear the debug canvas ONLY when a brand new physical flick begins
+        if (mag > 0.1f && currentStrokePath.isEmpty()) {
+            registeredDebugPeaks.clear()
+            lastDetectionType = ""
+        }
+
+        if (mag > 0.5f && !vibratedThisStroke) {
+            vibratedThisStroke = true
+            haptics.click() 
+        }
+
+        // --- PAIR INPUT MODE (Dual-Heuristic Detection) ---
+        if (pairInputMode && currentStrokePath.isNotEmpty()) {
+            
+            if (peakPt == null || mag > peakMag) {
+                peakPt = PointF(mapped.x, mapped.y)
+                peakMag = mag
+            }
+
+            var triggeredPair = false
+
+            // Heuristic A: The Diagonal Slice (Valley)
+            // TIGHTENED: Require a deeper drop (-0.4f instead of -0.25f) to prove they truly crossed the center
+            if (mag < peakMag - 0.4f) { 
+                inValley = true 
+            // TIGHTENED: Require a stronger push out of the valley (> 0.45f instead of > 0.3f)
+            } else if (inValley && mag > lastMag + 0.05f && mag > 0.45f) {
+                triggeredPair = true 
+                lastDetectionType = "Diagonal-slice"
+            }
+
+            // Heuristic B: The Rim-Roll
+            if (!triggeredPair && peakPt != null && peakMag > 0.6f) { // TIGHTENED: Peak must be stronger
+                val distFromPeak = getDistance(peakPt!!, mapped.x, mapped.y)
+                // TIGHTENED: Require a massive distance change (> 0.85f instead of > 0.7f) 
+                // AND demand they stay pinned hard against the outer edge (> 0.6f instead of > 0.4f)
+                if (distFromPeak > 0.85f && mag > 0.6f) {
+                    triggeredPair = true 
+                    lastDetectionType = "Rim-roll" 
+                }
+            }
+
+            if (triggeredPair && peakPt != null) {
+                wordProbabilities.add(generateProbabilityMap(peakPt!!))
+                registeredDebugPeaks.add(PointF(peakPt!!.x, peakPt!!.y)) // SAVE THE PEAK!
+                updateLivePredictions()
+                
+                vibratedThisStroke = false 
+                haptics.tick()
+                
+                currentStrokePath.clear()
+                currentStrokePath.add(PointF(mapped.x, mapped.y))
+                peakPt = null
+                peakMag = 0f
+                inValley = false
+                lastMag = mag
+                
+                // Update debug view immediately to show the glowing point mid-flick
+                visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
+                return
+            }
+        }
+        
+        lastMag = mag
+        // ----------------------------------------------
+
+        // Notice we changed this from 0.0f to 0.1f to enforce the hardware deadzone safety!
+        if (mag < 0.1f) {
+            vibratedThisStroke = false 
+            peakPt = null
+            peakMag = 0f
+            inValley = false
+            lastMag = 0f
+
+            if (currentStrokePath.isNotEmpty()) {
+                val maxPt = currentStrokePath.maxByOrNull { sqrt(it.x * it.x + it.y * it.y) }
+                if (maxPt != null && sqrt(maxPt.x * maxPt.x + maxPt.y * maxPt.y) > 0.01f) {
+                    
+                    if (currentMode == InputMode.T9) {
+                        // --- NORMAL PREDICTIVE MODE ---
+                        wordProbabilities.add(generateProbabilityMap(maxPt))
+                        registeredDebugPeaks.add(maxPt) 
+                        if (lastDetectionType.isEmpty()) lastDetectionType = "Normal flick" 
+                        updateLivePredictions()
+                    } else {
+                        // --- MANUAL ABC MODE ---
+                        val digitMap = generateProbabilityMap(maxPt)
+                        
+                        // THE FIX: Sort by probability to grab the winner AND the runner-up!
+                        val sortedDigits = digitMap.entries.sortedByDescending { it.value }
+                        val winningDigit = sortedDigits.getOrNull(0)?.key ?: '5'
+                        val runnerUpDigit = sortedDigits.getOrNull(1)?.key
+                        
+                        val chars = mutableListOf<String>()
+                        
+                        // Helper lambda to format and inject a digit's characters
+                        val injectChars = { targetDigit: Char ->
+                            val baseChars = t9Engine.getCharsForDigit(targetDigit)
+                            for (c in baseChars) {
+                                chars.add(c.uppercaseChar().toString()) // 'T'
+                                chars.add(c.toString())                 // 't'
+                            }
+                            chars.add(targetDigit.toString())           // '8'
+                        }
+                        
+                        // 1. Inject the primary intended digit
+                        injectChars(winningDigit)
+                        
+                        // 2. Inject the runner-up digit (in case their angle was slightly off)
+                        if (runnerUpDigit != null) {
+                            injectChars(runnerUpDigit)
+                        }
+                        
+                        currentPredictions = chars
+                        predictionIndex = 0
+                        isRadialMenuOpen = false 
+                        
+                        lastDetectionType = "Manual Entry"
+                    }
+                }
+                currentStrokePath.clear()
+                updateUI()
+                visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
+            }
+            return
+        }
+
+        currentStrokePath.add(PointF(mapped.x, mapped.y))
+        visualDebugView.updateJoyT9Debug(currentStrokePath, registeredDebugPeaks, wordProbabilities, lastDetectionType)
+    }
+
+    private fun updateLivePredictions() {
+        if (wordProbabilities.isNotEmpty()) {
+            currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
+            predictionIndex = 0
+            updateUI()
+        } else {
+            currentPredictions = emptyList()
+            updateUI()
+        }
+    }
+
     private fun executeAction(action: Action, isRepeat: Boolean = false) {
         val ic = currentInputConnection ?: return
 
@@ -1022,8 +1056,33 @@ class JoyTypeService : InputMethodService() {
                     executeUtilityCommand(currentPredictions[predictionIndex])
                     return
                 }
+
+                // --- MACRO INTERCEPT ---
                 if (currentMode == InputMode.MACRO) {
-                    // ... (keep your existing Macro execution logic) ...
+                    val targetIndex = if (isRadialMenuOpen) radialSelectedIndex else predictionIndex
+
+                    if (macroLibrary.isNotEmpty() && targetIndex < macroLibrary.size) {
+                        val selectedMacro = macroLibrary[targetIndex]
+                        val ic = currentInputConnection ?: return
+                        
+                        when (selectedMacro) {
+                            is MacroRepository.Macro.Keystroke -> {
+                                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                                    for (keyCode in selectedMacro.sequence) {
+                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+                                        kotlinx.coroutines.delay(15) 
+                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+                                        kotlinx.coroutines.delay(30)
+                                    }
+                                }
+                            }
+                            is MacroRepository.Macro.Pasteboard -> smartCommitText(selectedMacro.text)
+                            is MacroRepository.Macro.LuaScript -> { /* Future Lua execution */ }
+                        }
+                        
+                        isRadialMenuOpen = false
+                        updateUI() 
+                    }
                     return 
                 }
 
@@ -1033,20 +1092,22 @@ class JoyTypeService : InputMethodService() {
                 if (currentPredictions.isNotEmpty()) {
                     if (currentMode == InputMode.T9) {
                         var wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+                        
                         if (autoSpace) {
                             val textBefore = ic.getTextBeforeCursor(1, 0)?.toString() ?: ""
                             val requiresPreSpace = listOf(".", ",", "?", "!", ":", ";", ")", "]", "}").contains(textBefore)
                             if (requiresPreSpace) wordToCommit = " $wordToCommit"
-                        }
-                        
-                        smartCommitText(wordToCommit)
-                        
-                        if (autoSpace) {
+                            
                             val textAfter = ic.getTextAfterCursor(1, 0)?.toString() ?: ""
                             if (!textAfter.startsWith(" ") && !textAfter.startsWith(".") && !textAfter.startsWith(",")) {
-                                smartCommitText(" ") 
+                                // THE FIX: Append the space directly to the string!
+                                wordToCommit += " " 
                             }
                         }
+                        
+                        // THE FIX: Send the entire block to a single coroutine
+                        smartCommitText(wordToCommit)
+                        
                     } else {
                         smartCommitText(currentPredictions[predictionIndex])
                     }
@@ -1055,30 +1116,14 @@ class JoyTypeService : InputMethodService() {
                     resetState()
                     if (wasT9) lastAcceptTime = now 
                 } else {
-                    // --- EMULATOR-SAFE DOUBLE TAP ---
                     if (currentMode == InputMode.T9 && doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
                         val textBefore = ic.getTextBeforeCursor(10, 0)?.toString() ?: ""
                         val spacesMatch = Regex("\\s+$").find(textBefore)
                         
                         ic.beginBatchEdit()
                         if (spacesMatch != null) {
-                            val editorInfo = currentInputEditorInfo
-                            val requiresHardwareKeys = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
-                            
-                            if (requiresHardwareKeys) {
-                                // Emulators ignore software deletion, so spoof hardware backspaces!
-                                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                                    for (i in 0 until spacesMatch.value.length) {
-                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
-                                        kotlinx.coroutines.delay(10)
-                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
-                                    }
-                                }
-                            } else {
-                                ic.deleteSurroundingText(spacesMatch.value.length, 0)
-                            }
+                            smartDelete(spacesMatch.value.length)
                         }
-                        
                         smartCommitText(". ")
                         ic.endBatchEdit()
                         lastAcceptTime = 0L 
@@ -1093,7 +1138,7 @@ class JoyTypeService : InputMethodService() {
                 // If text is highlighted, just delete the selection
                 if (currentPredictions == UTILITY_ACTIONS) {
                     saveUndoSnapshot()
-                    ic.commitText("", 1)
+                    smartDelete(1)
                     resetState()
                     return
                 }
@@ -1115,7 +1160,7 @@ class JoyTypeService : InputMethodService() {
                         val spacesLen = spacesMatch?.value?.length ?: 0
                         val wordMatch = Regex("\\S+[ \\t]*$").find(textBefore)
                         val deleteLen = wordMatch?.value?.length ?: spacesLen
-                        if (deleteLen > 0) ic.deleteSurroundingText(deleteLen, 0)
+                        if (deleteLen > 0) smartDelete(deleteLen)
                     }
                 }
             }
@@ -1183,6 +1228,12 @@ class JoyTypeService : InputMethodService() {
                     // Generate the predictions
                     currentPredictions = t9Engine.getProbabilisticPredictions(wordProbabilities)
 
+                    // Restore original capitalization state! ---
+                    val isCapitalized = targetWord.isNotEmpty() && targetWord[0].isUpperCase()
+                    if (isCapitalized) {
+                        currentPredictions = currentPredictions.map { it.replaceFirstChar { c -> c.uppercase() } }
+                    }
+
                     // If the engine couldn't find the word
                     if (currentPredictions.isEmpty() || currentPredictions.none { it.equals(targetWord, ignoreCase = true) }) {
                         val newPredictions = currentPredictions.toMutableList()
@@ -1198,7 +1249,7 @@ class JoyTypeService : InputMethodService() {
                     updateUI()
                 }
             }
-                        Action.ADD_SPACE -> {
+            Action.ADD_SPACE -> {
                 saveUndoSnapshot()
                 fireActionHaptic()
 
@@ -1213,34 +1264,23 @@ class JoyTypeService : InputMethodService() {
 
                 if (currentPredictions.isNotEmpty()) {
                     if (currentMode == InputMode.T9) {
-                        val wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+                        var wordToCommit = getCapitalizedWord(currentPredictions[predictionIndex])
+                        // THE FIX: Append the space directly to the string!
+                        if (autoSpace) wordToCommit += " " 
                         smartCommitText(wordToCommit)
-                        if (autoSpace) smartCommitText(" ")
                         lastAcceptTime = now
                     } else {
                         smartCommitText(currentPredictions[predictionIndex])
                     }
                     resetState()
                 } else {
-                    // Mirrored the exact double-tap logic so Spacebar works flawlessly too!
                     if (currentMode == InputMode.T9 && doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
                         val textBefore = ic.getTextBeforeCursor(10, 0)?.toString() ?: ""
                         val spacesMatch = Regex("\\s+$").find(textBefore)
                         
                         ic.beginBatchEdit()
                         if (spacesMatch != null) {
-                            val editorInfo = currentInputEditorInfo
-                            if (editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL) {
-                                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                                    for (i in 0 until spacesMatch.value.length) {
-                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
-                                        kotlinx.coroutines.delay(10)
-                                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
-                                    }
-                                }
-                            } else {
-                                ic.deleteSurroundingText(spacesMatch.value.length, 0)
-                            }
+                            smartDelete(spacesMatch.value.length)
                         }
                         smartCommitText(". ")
                         ic.endBatchEdit()
@@ -1368,7 +1408,7 @@ class JoyTypeService : InputMethodService() {
                 // If text is highlighted, delete the entire selection
                 if (currentPredictions == UTILITY_ACTIONS) {
                     saveUndoSnapshot()
-                    ic.commitText("", 1)
+                    smartDelete(1)
                     resetState()
                     return
                 }
@@ -1380,7 +1420,7 @@ class JoyTypeService : InputMethodService() {
                 } else {
                     // NORMAL MODE: Act like a standard backspace
                     saveUndoSnapshot()
-                    ic.deleteSurroundingText(1, 0)
+                    smartDelete(1)
                 }
             }
             Action.CLOSE_KEYBOARD -> {
@@ -1402,17 +1442,18 @@ class JoyTypeService : InputMethodService() {
                 for(_i in 0 until jumpLength) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT))
             }
             Action.CYCLE_FWD -> {
-                if (currentPredictions.isNotEmpty()) {
+                val maxCount = if (currentMode == InputMode.MACRO) macroLibrary.size else currentPredictions.size
+                if (maxCount > 0) {
                     fireActionHaptic()
-                    predictionIndex = (predictionIndex + 1) % currentPredictions.size
+                    predictionIndex = (predictionIndex + 1) % maxCount
                     updateUI()
                 }
             }
             Action.CYCLE_BACK -> {
-                if (currentPredictions.isNotEmpty()) {
+                val maxCount = if (currentMode == InputMode.MACRO) macroLibrary.size else currentPredictions.size
+                if (maxCount > 0) {
                     fireActionHaptic()
-                    // Add currentPredictions.size to prevent negative modulo results!
-                    predictionIndex = (predictionIndex - 1 + currentPredictions.size) % currentPredictions.size
+                    predictionIndex = (predictionIndex - 1 + maxCount) % maxCount
                     updateUI()
                 }
             }
@@ -1564,7 +1605,13 @@ class JoyTypeService : InputMethodService() {
         val end = kotlin.math.min(start + 8, activeItems.size)
         val itemsToDraw = if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
 
-        val activeColor = if (state == RadialState.UTILITY) "#FF6B6B" else "#D084FF"
+        val activeColor = if (isRadialMenuOpen && radialDidMove) {
+            "#FFA500" // Warning Orange
+        } else if (state == RadialState.UTILITY) {
+            "#FF6B6B" // Utility Red
+        } else {
+            "#D084FF" // Prediction Purple
+        }
 
         // 4. Draw the Bar
         val valDisplay = if (isRadialMenuOpen) {
@@ -1627,70 +1674,7 @@ class JoyTypeService : InputMethodService() {
         }
     }
 
-    private fun generateProbabilityMap(pt: PointF): Map<Char, Float> {
-        val sigma = 0.55f
-        val probs = mutableMapOf<Char, Float>()
-        var sum = 0f
-        for ((digit, center) in t9Centers) {
-            val dist = getDistance(center, pt.x, pt.y)
-            val p = Math.exp(-(dist * dist) / (2 * sigma * sigma).toDouble()).toFloat()
-            probs[digit] = p
-            sum += p
-        }
-        return probs.mapValues { it.value / sum }
-    }
-
-    private fun mapCircleToSquare(u: Float, v: Float): PointF {
-        if (u == 0f && v == 0f) return PointF(0f, 0f)
-        val radius = sqrt(u * u + v * v)
-        val normalizedRadius = radius.coerceAtMost(1f)
-        val theta = atan2(v, u)
-        val cosTheta = abs(kotlin.math.cos(theta))
-        val sinTheta = abs(kotlin.math.sin(theta))
-        val scale = 1f / max(cosTheta, sinTheta)
-        val mappedRadius = normalizedRadius * scale
-        val x = mappedRadius * kotlin.math.cos(theta)
-        val y = mappedRadius * kotlin.math.sin(theta)
-        return PointF(x.coerceIn(-1f, 1f), y.coerceIn(-1f, 1f))
-    }
-
-    private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
-        return sqrt((x2 - p1.x) * (x2 - p1.x) + (y2 - p1.y) * (y2 - p1.y))
-    }
-
-    private fun getCapitalizedWord(word: String): String {
-        if (!autoCap) return word
-        if (word.lowercase() == "i") return "I"
-        
-        val ic = currentInputConnection ?: return word
-        
-        val textBefore = ic.getTextBeforeCursor(3, 0)?.toString() ?: ""
-        
-        // Trim trailing spaces so it recognizes "Hello." and "Hello. " equally!
-        val trimmedBefore = textBefore.trimEnd()
-        val isStartOfSentence = textBefore.isEmpty() || 
-                                trimmedBefore.endsWith(".") || 
-                                trimmedBefore.endsWith("!") || 
-                                trimmedBefore.endsWith("?") || 
-                                textBefore.endsWith("\n")
-
-        if (isStartOfSentence) {
-            return word.replaceFirstChar { it.uppercase() }
-        }
-
-        // 3. Fallback to OS checking just in case (for weird text fields)
-        val editorInfo = currentInputEditorInfo
-        if (editorInfo != null) {
-            val capsMode = ic.getCursorCapsMode(editorInfo.inputType)
-            if (capsMode > 0) {
-                return word.replaceFirstChar { it.uppercase() }
-            }
-        }
-        
-        return word
-    }
-
-    /**
+        /**
      * SINGLE SOURCE OF TRUTH FOR RESTING UI
      * Displays the resting dots and the inconspicuous Mode Badge.
      */
@@ -1715,33 +1699,66 @@ class JoyTypeService : InputMethodService() {
         val ic = currentInputConnection ?: return
         var shouldCollapse = true
 
+        // THE FIX: Hook directly into Android's system clipboard
+        val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+
         when (command) {
-            "Cancel" -> { } // Will collapse and close below
-            "Copy" -> ic.performContextMenuAction(android.R.id.copy)
-            "Paste" -> {
-                ic.performContextMenuAction(android.R.id.paste)
-                shouldCollapse = false // Let the OS move the cursor
+            "Cancel" -> { 
+                // Do nothing. Will collapse and close below.
+            }
+            "Copy" -> {
+                val selectedText = ic.getSelectedText(0)?.toString()
+                if (!selectedText.isNullOrEmpty()) {
+                    val clip = android.content.ClipData.newPlainText("JoyType", selectedText)
+                    clipboard.setPrimaryClip(clip)
+                }
             }
             "Cut" -> {
-                ic.performContextMenuAction(android.R.id.cut)
-                shouldCollapse = false 
+                val selectedText = ic.getSelectedText(0)?.toString()
+                if (!selectedText.isNullOrEmpty()) {
+                    val clip = android.content.ClipData.newPlainText("JoyType", selectedText)
+                    clipboard.setPrimaryClip(clip)
+                    ic.commitText("", 1) // Delete the selection natively
+                }
+                shouldCollapse = false // Let OS handle the new cursor position
+            }
+            "Paste" -> {
+                if (clipboard.hasPrimaryClip()) {
+                    val textToPaste = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                    if (textToPaste.isNotEmpty()) {
+                        // THE FIX: Route through smartCommitText!
+                        // In normal apps, it replaces the highlighted text instantly.
+                        // In emulators, it literally types out the clipboard contents!
+                        smartCommitText(textToPaste)
+                    }
+                }
+                shouldCollapse = false
+            }
+            "Select Word" -> {
+                val extracted = ic.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
+                if (extracted != null) {
+                    val text = extracted.text.toString()
+                    val cursor = extracted.selectionStart
+                    
+                    // Walk left and right to find word boundaries
+                    var start = cursor
+                    while (start > 0 && text[start - 1].isLetterOrDigit()) start--
+                    var end = cursor
+                    while (end < text.length && text[end].isLetterOrDigit()) end++
+                    
+                    if (start < end) {
+                        ic.setSelection(start, end)
+                        isHighlighting = true
+                        highlightAnchorIndex = start
+                        glideCursorIndex = end
+                        return // Exit early so we don't collapse the selection!
+                    }
+                }
             }
             "Select All" -> {
                 ic.performContextMenuAction(android.R.id.selectAll)
-                isHighlighting = true // Ensure the badge stays active
-                return // Exit early so we DON'T collapse the new selection
-            }
-            "Toggle Case" -> {
-                val selectedText = ic.getSelectedText(0)?.toString() ?: ""
-                if (selectedText.isNotEmpty()) {
-                    val newText = if (selectedText == selectedText.uppercase()) {
-                        selectedText.lowercase()
-                    } else {
-                        selectedText.uppercase()
-                    }
-                    ic.commitText(newText, 1)
-                    shouldCollapse = false // commitText moves cursor automatically
-                }
+                isHighlighting = true 
+                return // Exit early so we don't collapse the selection!
             }
         }
         
@@ -1784,5 +1801,96 @@ class JoyTypeService : InputMethodService() {
             // 3. Normal App (Chrome, Discord, etc.) - Use standard software string injection
             ic.commitText(textToCommit, 1)
         }
+    }
+
+    // For support in emulators
+    private fun smartDelete(length: Int) {
+        val ic = currentInputConnection ?: return
+        val editorInfo = currentInputEditorInfo
+        val requiresHardwareKeys = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
+        
+        if (requiresHardwareKeys) {
+            // Emulators: Spoof the physical backspace key!
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                for (i in 0 until length) {
+                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+                    kotlinx.coroutines.delay(10)
+                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+                    kotlinx.coroutines.delay(10) // Small buffer between repeated deletions
+                }
+            }
+        } else {
+            // Normal Apps
+            ic.deleteSurroundingText(length, 0)
+        }
+    }
+
+    private fun generateProbabilityMap(pt: PointF): Map<Char, Float> {
+        val sigma = 0.55f
+        val probs = mutableMapOf<Char, Float>()
+        var sum = 0f
+        for ((digit, center) in t9Centers) {
+            val dist = getDistance(center, pt.x, pt.y)
+            val p = Math.exp(-(dist * dist) / (2 * sigma * sigma).toDouble()).toFloat()
+            probs[digit] = p
+            sum += p
+        }
+        return probs.mapValues { it.value / sum }
+    }
+
+    private fun mapCircleToSquare(u: Float, v: Float): PointF {
+        if (u == 0f && v == 0f) return PointF(0f, 0f)
+        val radius = sqrt(u * u + v * v)
+        val normalizedRadius = radius.coerceAtMost(1f)
+        val theta = atan2(v, u)
+        val cosTheta = abs(kotlin.math.cos(theta))
+        val sinTheta = abs(kotlin.math.sin(theta))
+        val scale = 1f / max(cosTheta, sinTheta)
+        val mappedRadius = normalizedRadius * scale
+        val x = mappedRadius * kotlin.math.cos(theta)
+        val y = mappedRadius * kotlin.math.sin(theta)
+        return PointF(x.coerceIn(-1f, 1f), y.coerceIn(-1f, 1f))
+    }
+
+    private fun getDistance(p1: PointF, x2: Float, y2: Float): Float {
+        return sqrt((x2 - p1.x) * (x2 - p1.x) + (y2 - p1.y) * (y2 - p1.y))
+    }
+
+    private fun getCapitalizedWord(word: String): String {
+        if (!autoCap) return word
+
+        val editorInfo = currentInputEditorInfo
+        val requiresHardwareKeys = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
+        if (requiresHardwareKeys) {
+            return word // Emulators have no context. Default to raw engine output
+        }
+
+        if (word.lowercase() == "i") return "I"
+        
+        val ic = currentInputConnection ?: return word
+        
+        val textBefore = ic.getTextBeforeCursor(3, 0)?.toString() ?: ""
+        
+        // Trim trailing spaces so it recognizes "Hello." and "Hello. " equally!
+        val trimmedBefore = textBefore.trimEnd()
+        val isStartOfSentence = textBefore.isEmpty() || 
+                                trimmedBefore.endsWith(".") || 
+                                trimmedBefore.endsWith("!") || 
+                                trimmedBefore.endsWith("?") || 
+                                textBefore.endsWith("\n")
+
+        if (isStartOfSentence) {
+            return word.replaceFirstChar { it.uppercase() }
+        }
+
+        // 3. Fallback to OS checking just in case (for weird text fields)
+        if (editorInfo != null) {
+            val capsMode = ic.getCursorCapsMode(editorInfo.inputType)
+            if (capsMode > 0) {
+                return word.replaceFirstChar { it.uppercase() }
+            }
+        }
+        
+        return word
     }
 }

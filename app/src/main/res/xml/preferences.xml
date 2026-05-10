@@ -98,9 +98,14 @@
             android:key="key_close" android:title="Close Keyboard" />
         <com.vazbloke.joytype.KeyBindingPreference
             android:key="key_open_settings" android:title="Open Settings" />
-        <com.vazbloke.joytype.KeyBindingPreference
-            android:key="key_cheat_mpkfa" android:title="Cheat: Claw God Mode (MPKFA)" />
     </PreferenceCategory>
+
+    <androidx.preference.PreferenceCategory android:title="Macros">
+        <androidx.preference.Preference
+            android:key="manage_macros"
+            android:title="Manage Macros"
+            android:summary="Create, edit, and organize your macro sequences" />
+    </androidx.preference.PreferenceCategory>
 
     <androidx.preference.PreferenceCategory android:title="Experimental">
         <androidx.preference.SwitchPreferenceCompat

@@ -8,13 +8,31 @@ import org.json.JSONObject
 object MacroRepository {
     private const val PREF_KEY = "saved_macro_library"
 
-    // Data class lives here
-    data class Macro(val name: String, val sequence: List<Int>)
+    sealed class Macro {
+        abstract val name: String
+
+        // Type 1: Hardware Keystrokes (Needs precise timing/delays)
+        data class Keystroke(
+            override val name: String, 
+            val sequence: List<Int>
+        ) : Macro()
+
+        // Type 2: Pasteboard (Fire-and-forget text)
+        data class Pasteboard(
+            override val name: String, 
+            val text: String
+        ) : Macro()
+
+        // Type 3: Lua Script (Advanced logic)
+        data class LuaScript(
+            override val name: String, 
+            val scriptContent: String
+        ) : Macro()
+    }
 
     fun loadMacros(prefs: SharedPreferences): List<Macro> {
         val jsonString = prefs.getString(PREF_KEY, null)
         
-        // If no JSON exists, save and return the default library
         if (jsonString == null) {
             val defaults = getDefaultLibrary()
             saveMacros(prefs, defaults)
@@ -28,12 +46,21 @@ object MacroRepository {
                 val obj = jsonArray.getJSONObject(i)
                 val name = obj.getString("name")
                 
-                val seqArray = obj.getJSONArray("sequence")
-                val sequence = mutableListOf<Int>()
-                for (j in 0 until seqArray.length()) {
-                    sequence.add(seqArray.getInt(j))
+                // Smart fallback for old V1 macros
+                val type = if (obj.has("type")) obj.getString("type") else "keystroke"
+
+                when (type) {
+                    "keystroke" -> {
+                        val seqArray = obj.getJSONArray("sequence")
+                        val sequence = mutableListOf<Int>()
+                        for (j in 0 until seqArray.length()) {
+                            sequence.add(seqArray.getInt(j))
+                        }
+                        macros.add(Macro.Keystroke(name, sequence))
+                    }
+                    "pasteboard" -> macros.add(Macro.Pasteboard(name, obj.optString("text", "")))
+                    "luascript" -> macros.add(Macro.LuaScript(name, obj.optString("scriptContent", "")))
                 }
-                macros.add(Macro(name, sequence))
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -48,18 +75,27 @@ object MacroRepository {
             val obj = JSONObject()
             obj.put("name", macro.name)
             
-            val seqArray = JSONArray()
-            for (code in macro.sequence) {
-                seqArray.put(code)
+            when (macro) {
+                is Macro.Keystroke -> {
+                    obj.put("type", "keystroke")
+                    val seqArray = JSONArray()
+                    macro.sequence.forEach { seqArray.put(it) }
+                    obj.put("sequence", seqArray)
+                }
+                is Macro.Pasteboard -> {
+                    obj.put("type", "pasteboard")
+                    obj.put("text", macro.text)
+                }
+                is Macro.LuaScript -> {
+                    obj.put("type", "luascript")
+                    obj.put("scriptContent", macro.scriptContent)
+                }
             }
-            obj.put("sequence", seqArray)
-            
             jsonArray.put(obj)
         }
         prefs.edit().putString(PREF_KEY, jsonArray.toString()).apply()
     }
 
-    // A helper function to turn user-typed strings ("MPKFA") into hardware keycodes
     fun textToKeySequence(text: String): List<Int> {
         val codes = mutableListOf<Int>()
         for (char in text.uppercase()) {
@@ -71,7 +107,7 @@ object MacroRepository {
     }
 
     private fun getDefaultLibrary() = listOf(
-        Macro("Claw: God Mode", listOf(KeyEvent.KEYCODE_M, KeyEvent.KEYCODE_P, KeyEvent.KEYCODE_K, KeyEvent.KEYCODE_F, KeyEvent.KEYCODE_A)),
-        Macro("Doom: IDDQD", listOf(KeyEvent.KEYCODE_I, KeyEvent.KEYCODE_D, KeyEvent.KEYCODE_D, KeyEvent.KEYCODE_Q, KeyEvent.KEYCODE_D))
+        Macro.Keystroke("Claw: God Mode", listOf(KeyEvent.KEYCODE_M, KeyEvent.KEYCODE_P, KeyEvent.KEYCODE_K, KeyEvent.KEYCODE_F, KeyEvent.KEYCODE_A)),
+        Macro.Pasteboard("Paste Test", "player.additem 0000000f 100")
     )
 }

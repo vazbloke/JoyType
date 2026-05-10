@@ -1,15 +1,12 @@
 package com.vazbloke.joytype
 
 import android.os.Bundle
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ListView
+import android.view.KeyEvent
+import android.view.View
+import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.preference.PreferenceManager
-import android.view.KeyEvent
 
 class MacroManagerActivity : AppCompatActivity() {
 
@@ -19,8 +16,8 @@ class MacroManagerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES)
         
-        // MVP Layout constructed dynamically to save you writing an XML file
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
@@ -33,21 +30,13 @@ class MacroManagerActivity : AppCompatActivity() {
         root.addView(listView)
         setContentView(root)
 
-        // Load existing macros
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
         macros = MacroRepository.loadMacros(prefs).toMutableList()
 
         refreshList()
 
-        // Handle Add Button
-        btnAdd.setOnClickListener {
-            showMacroDialog(null, -1)
-        }
-
-        // Handle Edit/Delete on click
-        listView.setOnItemClickListener { _, _, position, _ ->
-            showMacroDialog(macros[position], position)
-        }
+        btnAdd.setOnClickListener { showMacroDialog(null, -1) }
+        listView.setOnItemClickListener { _, _, position, _ -> showMacroDialog(macros[position], position) }
     }
 
     private fun showMacroDialog(existingMacro: MacroRepository.Macro?, index: Int) {
@@ -57,41 +46,71 @@ class MacroManagerActivity : AppCompatActivity() {
         }
 
         val inputName = EditText(this).apply {
-            hint = "Display Name (e.g., Infinite Ammo)"
+            hint = "Display Name"
             setText(existingMacro?.name ?: "")
         }
         
-        val inputSequence = EditText(this).apply {
-            hint = "Sequence (e.g., MPKFA)"
-            // Convert existing KeyCodes back to a readable string for editing
-            val existingStr = existingMacro?.sequence?.mapNotNull { 
-                when (it) {
-                    KeyEvent.KEYCODE_SPACE -> " "
-                    in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z -> ('A' + (it - KeyEvent.KEYCODE_A)).toString()
-                    in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> ('0' + (it - KeyEvent.KEYCODE_0)).toString()
-                    else -> null
+        val typeSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MacroManagerActivity, android.R.layout.simple_spinner_dropdown_item, listOf("Keystroke Sequence", "Pasteboard Text", "Lua Script"))
+        }
+
+        val inputContent = EditText(this).apply {
+            val existingStr = when (existingMacro) {
+                is MacroRepository.Macro.Keystroke -> {
+                    existingMacro.sequence.mapNotNull { 
+                        when (it) {
+                            KeyEvent.KEYCODE_SPACE -> " "
+                            in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z -> ('A' + (it - KeyEvent.KEYCODE_A)).toString()
+                            in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> ('0' + (it - KeyEvent.KEYCODE_0)).toString()
+                            else -> null
+                        }
+                    }.joinToString("")
                 }
-            }?.joinToString("") ?: ""
-            
+                is MacroRepository.Macro.Pasteboard -> existingMacro.text
+                is MacroRepository.Macro.LuaScript -> existingMacro.scriptContent
+                null -> ""
+            }
             setText(existingStr)
         }
 
+        // Set initial spinner state
+        when (existingMacro) {
+            is MacroRepository.Macro.Pasteboard -> typeSpinner.setSelection(1)
+            is MacroRepository.Macro.LuaScript -> typeSpinner.setSelection(2)
+            else -> typeSpinner.setSelection(0)
+        }
+
+        // Dynamically change hints based on selection
+        typeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                inputContent.hint = when (position) {
+                    0 -> "Sequence (e.g., MPKFA)"
+                    1 -> "Text to paste (e.g., player.additem)"
+                    else -> "Lua Code"
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
         layout.addView(inputName)
-        layout.addView(inputSequence)
+        layout.addView(typeSpinner)
+        layout.addView(inputContent)
 
         val dialog = AlertDialog.Builder(this)
             .setTitle(if (existingMacro == null) "New Macro" else "Edit Macro")
             .setView(layout)
             .setPositiveButton("Save") { _, _ ->
                 val newName = inputName.text.toString().trim()
-                val newSeq = inputSequence.text.toString().trim()
+                val newContent = inputContent.text.toString()
                 
-                if (newName.isNotEmpty() && newSeq.isNotEmpty()) {
-                    val newMacro = MacroRepository.Macro(newName, MacroRepository.textToKeySequence(newSeq))
+                if (newName.isNotEmpty() && newContent.isNotEmpty()) {
+                    val newMacro = when (typeSpinner.selectedItemPosition) {
+                        0 -> MacroRepository.Macro.Keystroke(newName, MacroRepository.textToKeySequence(newContent))
+                        1 -> MacroRepository.Macro.Pasteboard(newName, newContent)
+                        else -> MacroRepository.Macro.LuaScript(newName, newContent)
+                    }
                     
-                    if (index >= 0) macros[index] = newMacro
-                    else macros.add(newMacro)
-                    
+                    if (index >= 0) macros[index] = newMacro else macros.add(newMacro)
                     saveAndRefresh()
                 }
             }
@@ -103,18 +122,26 @@ class MacroManagerActivity : AppCompatActivity() {
                 saveAndRefresh()
             }
         }
-
         dialog.show()
     }
 
     private fun saveAndRefresh() {
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
         MacroRepository.saveMacros(prefs, macros)
+        macros = MacroRepository.loadMacros(prefs).toMutableList() // Reload to sync
         refreshList()
     }
 
     private fun refreshList() {
-        val displayNames = macros.map { it.name }
+        // Show type tag in the list for clarity
+        val displayNames = macros.map { 
+            val typeStr = when(it) {
+                is MacroRepository.Macro.Keystroke -> "[Key]"
+                is MacroRepository.Macro.Pasteboard -> "[Text]"
+                is MacroRepository.Macro.LuaScript -> "[Lua]"
+            }
+            "$typeStr ${it.name}" 
+        }
         adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, displayNames)
         listView.adapter = adapter
     }

@@ -32,5 +32,6 @@
             android:label="JoyType Settings" />
         
         <activity android:name="com.vazbloke.joytype.CustomDictionaryActivity" android:theme="@style/Theme.AppCompat.NoActionBar"/>
+        <activity android:name=".MacroManagerActivity" />
     </application>
 </manifest>

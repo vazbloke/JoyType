@@ -2,19 +2,18 @@ package com.vazbloke.joytype
 
 import kotlin.math.atan2
 
-class RadialWheelEngine(private val listener: RadialWheelListener) {
+//  FIX maxSectors is now an intrinsic property of the Engine
+class RadialWheelEngine(val maxSectors: Int, private val listener: RadialWheelListener) {
 
-    // --- State ---
     var radialPage = 0
         private set
     var radialSelectedIndex = 0
         private set
 
-    private var radialLastOctant = -1
+    private var radialLastSector = -1
     private var isPeggedAtStart = false
     private var isPeggedAtEnd = false
 
-    // --- Callbacks ---
     interface RadialWheelListener {
         fun onIndexChanged(newIndex: Int, page: Int)
         fun onTick()
@@ -25,10 +24,10 @@ class RadialWheelEngine(private val listener: RadialWheelListener) {
      * Feeds the joystick data into the engine. 
      * Calculates octants, crossovers, pagination, and triggers haptics.
      */
-    fun updateInput(x: Float, y: Float, mag: Float, totalItemsCount: Int) {
+    fun updateInput(x: Float, y: Float, mag: Float, totalItemsCount: Int, disabledIndices: Set<Int> = emptySet()) {
         if (mag <= 0.3f) {
             // Stick released -> Reset scroll states
-            radialLastOctant = -1
+            radialLastSector = -1
             isPeggedAtStart = false
             isPeggedAtEnd = false
             return
@@ -38,20 +37,22 @@ class RadialWheelEngine(private val listener: RadialWheelListener) {
         angle += Math.PI / 2.0
         if (angle < 0) angle += 2 * Math.PI
 
-        val octant = Math.round(angle / (Math.PI / 4.0)).toInt() % 8
-        val maxPages = kotlin.math.ceil(totalItemsCount / 8.0).toInt().coerceAtLeast(1)
+        val sectorAngle = (2 * Math.PI) / maxSectors
+        val sector = Math.round(angle / sectorAngle).toInt() % maxSectors
+        val maxPages = kotlin.math.ceil(totalItemsCount.toDouble() / maxSectors).toInt().coerceAtLeast(1)
 
-        if (radialLastOctant != -1 && octant != radialLastOctant) {
-            var delta = octant - radialLastOctant
-            if (delta > 4) delta -= 8
-            if (delta < -4) delta += 8
+        if (radialLastSector != -1 && sector != radialLastSector) {
+            var delta = sector - radialLastSector
+            
+            val half = maxSectors / 2.0
+            if (delta > half) delta -= maxSectors
+            if (delta < -half) delta += maxSectors
 
             val isMovingForward = delta > 0
             val isMovingBackward = delta < 0
             var justPegged = false
 
-            // Clockwise crossover (7 to 0)
-            if (radialLastOctant == 7 && octant == 0) {
+            if (radialLastSector == maxSectors - 1 && sector == 0) {
                 if (isPeggedAtStart) {
                     isPeggedAtStart = false
                     listener.onTick()
@@ -63,8 +64,8 @@ class RadialWheelEngine(private val listener: RadialWheelListener) {
                     listener.onThud()
                 }
             }
-            // Counter-Clockwise crossover (0 to 7)
-            else if (radialLastOctant == 0 && octant == 7) {
+            // Counter-Clockwise crossover
+            else if (radialLastSector == 0 && sector == maxSectors - 1) {
                 if (isPeggedAtEnd) {
                     isPeggedAtEnd = false
                     listener.onTick()
@@ -87,14 +88,13 @@ class RadialWheelEngine(private val listener: RadialWheelListener) {
             }
         }
 
-        radialLastOctant = octant
+        radialLastSector = sector
 
         if (totalItemsCount > 0) {
-            // Calculate how many items are actually on the current page
-            val itemsOnCurrentPage = if (radialPage == maxPages - 1 && totalItemsCount % 8 != 0) {
-                totalItemsCount % 8
+            val itemsOnCurrentPage = if (radialPage == maxPages - 1 && totalItemsCount % maxSectors != 0) {
+                totalItemsCount % maxSectors
             } else {
-                kotlin.math.min(8, totalItemsCount)
+                kotlin.math.min(maxSectors, totalItemsCount)
             }
 
             val newIndex = if (isPeggedAtStart) {
@@ -102,12 +102,30 @@ class RadialWheelEngine(private val listener: RadialWheelListener) {
             } else if (isPeggedAtEnd) {
                 itemsOnCurrentPage - 1
             } else {
-                octant.coerceAtMost(itemsOnCurrentPage - 1)
+                sector.coerceAtMost(itemsOnCurrentPage - 1)
             }
 
-            // Only update and tick if the index actually changed
-            if (newIndex != radialSelectedIndex) {
-                radialSelectedIndex = newIndex
+            var snappedIndex = newIndex
+            if (disabledIndices.contains(snappedIndex) && disabledIndices.size < itemsOnCurrentPage) {
+                var left = snappedIndex
+                var right = snappedIndex
+                while(true) {
+                    right++
+                    if (right < itemsOnCurrentPage && !disabledIndices.contains(right)) {
+                        snappedIndex = right
+                        break
+                    }
+                    left--
+                    if (left >= 0 && !disabledIndices.contains(left)) {
+                        snappedIndex = left
+                        break
+                    }
+                    if (left < 0 && right >= itemsOnCurrentPage) break 
+                }
+            }
+
+            if (snappedIndex != radialSelectedIndex) {
+                radialSelectedIndex = snappedIndex
                 if (!isPeggedAtStart && !isPeggedAtEnd) {
                     listener.onTick()
                 }
@@ -119,7 +137,7 @@ class RadialWheelEngine(private val listener: RadialWheelListener) {
     fun reset() {
         radialPage = 0
         radialSelectedIndex = 0
-        radialLastOctant = -1
+        radialLastSector = -1
         isPeggedAtStart = false
         isPeggedAtEnd = false
     }

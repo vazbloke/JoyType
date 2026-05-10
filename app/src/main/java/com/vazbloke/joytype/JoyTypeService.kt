@@ -58,6 +58,7 @@ class JoyTypeService : InputMethodService() {
 
     private var currentPredictions = listOf<String>()
     private var predictionIndex = 0
+    private val ABC_DIGITS = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
 
     // --- Undo/Redo State ---
     private data class TextSnapshot(val text: CharSequence, val selectionStart: Int, val selectionEnd: Int)
@@ -319,17 +320,26 @@ class JoyTypeService : InputMethodService() {
         }
     }
 
-    private val radialEngine = RadialWheelEngine(object : RadialWheelEngine.RadialWheelListener {
-        override fun onIndexChanged(newIndex: Int, page: Int) {
-            updateUI() // Redraw the screen when the selection changes!
+    // ---  MULTI-ENGINE ARCHITECTURE ---
+    private val radialListener = object : RadialWheelEngine.RadialWheelListener {
+        override fun onIndexChanged(newIndex: Int, page: Int) { updateUI() }
+        override fun onTick() { haptics.tick() }
+        override fun onThud() { haptics.thud() }
+    }
+
+    // Engine 1: The Standard 8-Way Wheel
+    private val defaultRadialEngine = RadialWheelEngine(8, radialListener)
+    
+    // Engine 2: The ABC 9-Way Wheel
+    private val abcRadialEngine = RadialWheelEngine(9, radialListener)
+
+    // Dynamic Router: Automatically serves the correct engine based on current state
+    private val activeRadialEngine: RadialWheelEngine
+        get() = if (currentMode == InputMode.ABC && currentRadialState == RadialState.PREDICTIONS) {
+            abcRadialEngine
+        } else {
+            defaultRadialEngine
         }
-        override fun onTick() {
-            haptics.tick()
-        }
-        override fun onThud() {
-            haptics.thud()
-        }
-    })
 
     private fun loadSettings() {
         autoSpace = prefs.getBoolean("autospace_after_accept", true)
@@ -476,15 +486,20 @@ class JoyTypeService : InputMethodService() {
                     radialDidMove = true
                 }
                 
-                // Route the input to the engine based on our Source of Truth
                 val activeItemsCount = when(currentRadialState) {
                     RadialState.MACRO -> macroLibrary.size
                     RadialState.SPECIAL_CHARS -> SPECIAL_CHARS.size
                     RadialState.UTILITY -> UTILITY_ACTIONS.size
                     RadialState.PREDICTIONS -> currentPredictions.size
                 }
+                val editorInfo = currentInputEditorInfo
+                val isEmulator = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
                 
-                radialEngine.updateInput(x, y, mag, activeItemsCount)
+                val disabledIndices = if (isEmulator && currentRadialState == RadialState.UTILITY) {
+                    setOf(1, 3, 4, 5) 
+                } else emptySet()
+                
+                activeRadialEngine.updateInput(x, y, mag, activeItemsCount, disabledIndices)
                 return true
             }
 
@@ -575,7 +590,7 @@ class JoyTypeService : InputMethodService() {
         if (targetRadialKey != -1 && keyCode == targetRadialKey) {
             isRadialMenuOpen = true
             radialDidMove = false
-            radialEngine.reset()
+            activeRadialEngine.reset()
             
             tvPredictions.animate().cancel() 
             tvPredictions.alpha = 0f
@@ -641,6 +656,11 @@ class JoyTypeService : InputMethodService() {
             return true // We ate the event and handled it mathematically.
         }
 
+        // FIX: Blackhole to consume all unmapped gamepad buttons (when keyboard open) so they don't leak to the OS
+        if (KeyEvent.isGamepadButton(keyCode)) {
+            return true
+        }
+
         return super.onKeyDown(keyCode, event)
     }
 
@@ -663,9 +683,16 @@ class JoyTypeService : InputMethodService() {
                 tvPredictions.animate().cancel()
                 tvPredictions.translationY = 0f
 
-                // THE SAFETY CATCH: Only execute if they actively flicked the stick!
+                // SAFETY CATCH: Only execute if they actively flicked the stick
                 if (radialDidMove) {
-                    val actualIndex = (radialEngine.radialPage * 8) + radialEngine.radialSelectedIndex
+                    val activeItemsCount = when(currentRadialState) {
+                        RadialState.MACRO -> macroLibrary.size
+                        RadialState.SPECIAL_CHARS -> SPECIAL_CHARS.size
+                        RadialState.UTILITY -> UTILITY_ACTIONS.size
+                        RadialState.PREDICTIONS -> currentPredictions.size
+                    }
+                    
+                    val actualIndex = (activeRadialEngine.radialPage * activeRadialEngine.maxSectors) + activeRadialEngine.radialSelectedIndex
                     val ic = currentInputConnection
                     
                     when (currentRadialState) {
@@ -712,7 +739,17 @@ class JoyTypeService : InputMethodService() {
                         }
                         RadialState.UTILITY -> {
                             if (actualIndex < UTILITY_ACTIONS.size) {
-                                executeUtilityCommand(UTILITY_ACTIONS[actualIndex])
+                                val command = UTILITY_ACTIONS[actualIndex]
+                                val editorInfo = currentInputEditorInfo
+                                val isEmulator = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
+                                val isDisabled = isEmulator && command in listOf("Copy", "Cut", "Select Word", "Select All")
+                                
+                                if (!isDisabled) {
+                                    executeUtilityCommand(command)
+                                } else {
+                                    resetState()
+                                    updateUI()
+                                }
                             }
                         }
                         RadialState.PREDICTIONS -> {
@@ -723,6 +760,24 @@ class JoyTypeService : InputMethodService() {
                                     smartCommitText(wordToCommit)
                                     if (autoSpace) smartCommitText(" ")
                                     lastAcceptTime = System.currentTimeMillis()
+                                } else if (currentMode == InputMode.ABC && currentPredictions == ABC_DIGITS) {
+                                    
+                                    // --- Radial Stage 1 (Dive into the Letters) ---
+                                    val targetDigit = currentPredictions[actualIndex].first()
+                                    val chars = mutableListOf<String>()
+                                    val baseChars = t9Engine.getCharsForDigit(targetDigit)
+                                    for (c in baseChars) {
+                                        chars.add(c.uppercaseChar().toString())
+                                        chars.add(c.toString())
+                                    }
+                                    chars.add(targetDigit.toString())
+                                    
+                                    currentPredictions = chars
+                                    predictionIndex = 0
+                                    isRadialMenuOpen = false // Close the wheel to show the new bar
+                                    updateUI()
+                                    return true // Bypass standard completion so they stay in Stage 2
+                                    
                                 } else {
                                     smartCommitText(currentPredictions[actualIndex])
                                 }
@@ -743,6 +798,11 @@ class JoyTypeService : InputMethodService() {
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
                 currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
             }
+            return true
+        }
+
+        // FIX: Blackhole to consume all unmapped gamepad buttons (when keyboard open) so they don't leak to the OS
+        if (KeyEvent.isGamepadButton(keyCode)) {
             return true
         }
 
@@ -806,7 +866,22 @@ class JoyTypeService : InputMethodService() {
         updateSelectionBadgeUI()
     }
 
+    override fun onComputeInsets(outInsets: Insets) {
+        super.onComputeInsets(outInsets)
+        val editorInfo = currentInputEditorInfo
+        val isEmulator = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
+        
+        if (isEmulator) {
+            // FIX: Report a floating overlay so the emulator doesn't squish its screen
+            val windowHeight = window.window?.decorView?.height ?: 0
+            outInsets.contentTopInsets = windowHeight
+        }
+    }
+
     private fun handleStrokeInput(rawX: Float, rawY: Float, mag: Float) {
+        // Disable canvas flicking in ABC mode
+        if (currentMode == InputMode.ABC) return
+
         val mapped = mapCircleToSquare(rawX, rawY)
 
         // UX Polish: Clear the debug canvas ONLY when a brand new physical flick begins
@@ -971,7 +1046,11 @@ class JoyTypeService : InputMethodService() {
 
                 // --- MACRO INTERCEPT ---
                 if (currentMode == InputMode.MACRO) {
-                    val targetIndex = if (isRadialMenuOpen) radialEngine.radialSelectedIndex else predictionIndex
+                    val targetIndex = if (isRadialMenuOpen) {
+                        (activeRadialEngine.radialPage * activeRadialEngine.maxSectors) + activeRadialEngine.radialSelectedIndex
+                    } else {
+                        predictionIndex
+                    }
 
                     if (macroLibrary.isNotEmpty() && targetIndex < macroLibrary.size) {
                         val selectedMacro = macroLibrary[targetIndex]
@@ -1017,8 +1096,24 @@ class JoyTypeService : InputMethodService() {
                             }
                         }
                         
-                        // THE FIX: Send the entire block to a single coroutine
+                        // Send the entire block to a single coroutine (for spaces)
                         smartCommitText(wordToCommit)
+                    } else if (currentMode == InputMode.ABC && currentPredictions == ABC_DIGITS) {
+                        
+                        // --- STAGE 1 (Dive into the Letters) ---
+                        val targetDigit = currentPredictions[predictionIndex].first()
+                        val chars = mutableListOf<String>()
+                        val baseChars = t9Engine.getCharsForDigit(targetDigit)
+                        for (c in baseChars) {
+                            chars.add(c.uppercaseChar().toString())
+                            chars.add(c.toString())
+                        }
+                        chars.add(targetDigit.toString())
+                        
+                        currentPredictions = chars
+                        predictionIndex = 0
+                        updateUI()
+                        return // Exit early so we don't trigger the resetState() below
                         
                     } else {
                         smartCommitText(currentPredictions[predictionIndex])
@@ -1197,6 +1292,22 @@ class JoyTypeService : InputMethodService() {
                         smartCommitText(". ")
                         ic.endBatchEdit()
                         lastAcceptTime = 0L
+                    } else if (currentMode == InputMode.ABC && currentPredictions == ABC_DIGITS) {
+                        
+                        // --- STAGE 1 (Dive into the Letters) ---
+                        val targetDigit = currentPredictions[predictionIndex].first()
+                        val chars = mutableListOf<String>()
+                        val baseChars = t9Engine.getCharsForDigit(targetDigit)
+                        for (c in baseChars) {
+                            chars.add(c.uppercaseChar().toString())
+                            chars.add(c.toString())
+                        }
+                        chars.add(targetDigit.toString())
+                        
+                        currentPredictions = chars
+                        predictionIndex = 0
+                        updateUI()
+                        return // Exit early so we don't trigger the resetState() below
                     } else {
                         smartCommitText(" ")
                         if (currentMode == InputMode.T9) lastAcceptTime = now
@@ -1316,6 +1427,13 @@ class JoyTypeService : InputMethodService() {
             }
             Action.BACKSPACE_STROKE -> {
                 fireActionHaptic()
+
+                // STAGE 2 CANCEL: Pressing backspace returns you to the Digits
+                if (currentMode == InputMode.ABC && currentPredictions != ABC_DIGITS) {
+                    resetState()
+                    updateUI()
+                    return
+                }
 
                 // If text is highlighted, delete the entire selection
                 if (currentPredictions == UTILITY_ACTIONS) {
@@ -1464,14 +1582,23 @@ class JoyTypeService : InputMethodService() {
         currentStrokePath.clear()
         wordProbabilities.clear()
         circleDetectedThisStroke = false
-        currentPredictions = emptyList()
-        predictionIndex = 0
+
+        // Two-Stage ABC Initialization
+        if (currentMode == InputMode.ABC) {
+            currentPredictions = ABC_DIGITS
+            predictionIndex = 0
+        } else {
+            currentPredictions = emptyList()
+            predictionIndex = 0
+        }
+
         visualDebugView.clear()
         setRestingUI()  
 
         isRadialMenuOpen = false
         radialDidMove = false
-        radialEngine.reset()
+        defaultRadialEngine.reset()
+        abcRadialEngine.reset()
         vibratedThisStroke = false
 
         lastMag = 0f
@@ -1501,8 +1628,14 @@ class JoyTypeService : InputMethodService() {
             return
         }
 
-        tvModeBadge.visibility = View.GONE
-        
+        // BADGE FIX: Explicitly set it here, and NEVER set it to GONE unless resting.
+        tvModeBadge.visibility = View.VISIBLE
+        tvModeBadge.text = when (currentMode) {
+            InputMode.T9 -> "[T9]"
+            InputMode.ABC -> "[ABC]"
+            InputMode.MACRO -> "[MAC]"
+        }
+
         // 3. Gather Active Items using Source of Truth
         val state = currentRadialState
         val activeItems = when (state) {
@@ -1511,10 +1644,17 @@ class JoyTypeService : InputMethodService() {
             RadialState.UTILITY -> UTILITY_ACTIONS
             RadialState.PREDICTIONS -> currentPredictions
         }
-        
-        val start = radialEngine.radialPage * 8
-        val end = kotlin.math.min(start + 8, activeItems.size)
-        val itemsToDraw = if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
+
+        // 4. Determine Items to Draw using the cleanly abstracted Engine
+        val engine = activeRadialEngine
+        val itemsToDraw = if (isRadialMenuOpen) {
+            val start = engine.radialPage * engine.maxSectors
+            val end = kotlin.math.min(start + engine.maxSectors, activeItems.size)
+            if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
+        } else {
+            // ARRAY FIX: If the wheel is closed, draw EVERYTHING. No slicing
+            activeItems 
+        }
 
         val activeColor = if (isRadialMenuOpen && radialDidMove) {
             "#FFA500" // Warning Orange
@@ -1524,14 +1664,26 @@ class JoyTypeService : InputMethodService() {
             "#D084FF" // Prediction Purple
         }
 
-        // 4. Draw the Bar
+        // 5. Draw the Bar
         val valDisplay = if (isRadialMenuOpen) {
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
+            
+            val editorInfo = currentInputEditorInfo
+            val isEmulator = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
+
             itemsToDraw.mapIndexed { index, word ->
-                val textToDraw = if (state == RadialState.SPECIAL_CHARS) "  $word  " else word
-                val dir = if (index < arrows.size) "${arrows[index]} " else ""
+                val isDisabled = isEmulator && state == RadialState.UTILITY && word in listOf("Copy", "Cut", "Select Word", "Select All")
                 
-                if (index == radialEngine.radialSelectedIndex) {
+                val textToDraw = if (isDisabled) {
+                    "<font color='#444444'>$word</font>"
+                } else if (state == RadialState.SPECIAL_CHARS) {
+                    "  $word  "
+                } else word
+                
+                // Only display directional arrows if it's the standard 8-way wheel
+                val dir = if (engine.maxSectors == 8 && index < arrows.size) "${arrows[index]} " else ""
+                
+                if (index == engine.radialSelectedIndex && !isDisabled) {
                     "<b>[<font color='#555555'>$dir</font><font color='$activeColor'>$textToDraw</font><font color='#555555'>]</font></b>" 
                 } else {
                     "<font color='#555555'>$dir$textToDraw</font>"
@@ -1546,17 +1698,17 @@ class JoyTypeService : InputMethodService() {
 
         tvPredictions.text = android.text.Html.fromHtml(valDisplay, android.text.Html.FROM_HTML_MODE_LEGACY)
 
-        // 5. Pagination Badge
-        val maxPages = kotlin.math.ceil(activeItems.size / 8.0).toInt().coerceAtLeast(1)
+        // 6. Pagination Badge
+        val maxPages = kotlin.math.ceil(activeItems.size.toDouble() / engine.maxSectors).toInt().coerceAtLeast(1)
         if (isRadialMenuOpen && maxPages > 1) {
-            tvPaginationBadge.text = "[${radialEngine.radialPage + 1}/$maxPages]"
+            tvPaginationBadge.text = "[${engine.radialPage + 1}/$maxPages]"
             tvPaginationBadge.visibility = View.VISIBLE
         } else {
             tvPaginationBadge.visibility = View.GONE
         }
 
-        // 6. Scroll Offset Fix
-        val capturedSelectedIndex = radialEngine.radialSelectedIndex
+        // 7. Scroll Offset Fix
+        val capturedSelectedIndex = engine.radialSelectedIndex
         val capturedItems = itemsToDraw.toList()
 
         if (isRadialMenuOpen && capturedItems.isNotEmpty()) {
@@ -1727,12 +1879,18 @@ class JoyTypeService : InputMethodService() {
                     ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
                     kotlinx.coroutines.delay(10)
                     ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
-                    kotlinx.coroutines.delay(10) // Small buffer between repeated deletions
+                    kotlinx.coroutines.delay(10)
                 }
             }
         } else {
-            // Normal Apps
-            ic.deleteSurroundingText(length, 0)
+            // If text is highlighted, deleteSurroundingText fails. Replace it natively
+            val selectedText = ic.getSelectedText(0)
+            if (!selectedText.isNullOrEmpty()) {
+                ic.commitText("", 1)
+            } else {
+                // Normal Apps
+                ic.deleteSurroundingText(length, 0)
+            }
         }
     }
 

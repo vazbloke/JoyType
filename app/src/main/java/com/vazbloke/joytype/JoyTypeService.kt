@@ -10,10 +10,14 @@ import android.view.View
 import android.view.inputmethod.ExtractedTextRequest
 import android.widget.TextView
 import androidx.preference.PreferenceManager
+
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.max
@@ -23,6 +27,8 @@ class JoyTypeService : InputMethodService() {
 
     private lateinit var visualDebugView: VisualDebugView
     private val t9Engine = T9Engine()
+    private val hardwareTypingMutex = Mutex()
+
     private lateinit var prefs: SharedPreferences
 
     // --- Core State ---
@@ -58,7 +64,17 @@ class JoyTypeService : InputMethodService() {
 
     private var currentPredictions = listOf<String>()
     private var predictionIndex = 0
-    private val ABC_DIGITS = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
+    private val ABC_DIGITS = listOf(
+        "1<small><font color='#999999'>.,?</font></small>", 
+        "2<small><font color='#999999'>abc</font></small>", 
+        "3<small><font color='#999999'>def</font></small>", 
+        "4<small><font color='#999999'>ghi</font></small>", 
+        "5<small><font color='#999999'>jkl</font></small>", 
+        "6<small><font color='#999999'>mno</font></small>", 
+        "7<small><font color='#999999'>pqrs</font></small>", 
+        "8<small><font color='#999999'>tuv</font></small>", 
+        "9<small><font color='#999999'>wxyz</font></small>"
+    )
 
     // --- Undo/Redo State ---
     private data class TextSnapshot(val text: CharSequence, val selectionStart: Int, val selectionEnd: Int)
@@ -483,7 +499,11 @@ class JoyTypeService : InputMethodService() {
             // --- RADIAL UI JOYSTICK INTERCEPT ---
             if (isRadialMenuOpen) {
                 if (mag > 0.3f) {
+                    val justWokeUp = !radialDidMove
                     radialDidMove = true
+                    
+                    // FIX: Force an instant redraw to paint the Orange highlight on Index 0
+                    if (justWokeUp) updateUI()
                 }
                 
                 val activeItemsCount = when(currentRadialState) {
@@ -761,21 +781,8 @@ class JoyTypeService : InputMethodService() {
                                     if (autoSpace) smartCommitText(" ")
                                     lastAcceptTime = System.currentTimeMillis()
                                 } else if (currentMode == InputMode.ABC && currentPredictions == ABC_DIGITS) {
-                                    
-                                    // --- Radial Stage 1 (Dive into the Letters) ---
-                                    val targetDigit = currentPredictions[actualIndex].first()
-                                    val chars = mutableListOf<String>()
-                                    val baseChars = t9Engine.getCharsForDigit(targetDigit)
-                                    for (c in baseChars) {
-                                        chars.add(c.uppercaseChar().toString())
-                                        chars.add(c.toString())
-                                    }
-                                    chars.add(targetDigit.toString())
-                                    
-                                    currentPredictions = chars
-                                    predictionIndex = 0
-                                    isRadialMenuOpen = false // Close the wheel to show the new bar
-                                    updateUI()
+                                    // --- STAGE 1 (Dive into the Letters / Symbols) ---
+                                    diveIntoAbcStage2(currentPredictions[actualIndex])
                                     return true // Bypass standard completion so they stay in Stage 2
                                     
                                 } else {
@@ -864,18 +871,6 @@ class JoyTypeService : InputMethodService() {
         // Force the initial reactive draws on boot!
         updateModeBadgeUI()
         updateSelectionBadgeUI()
-    }
-
-    override fun onComputeInsets(outInsets: Insets) {
-        super.onComputeInsets(outInsets)
-        val editorInfo = currentInputEditorInfo
-        val isEmulator = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
-        
-        if (isEmulator) {
-            // FIX: Report a floating overlay so the emulator doesn't squish its screen
-            val windowHeight = window.window?.decorView?.height ?: 0
-            outInsets.contentTopInsets = windowHeight
-        }
     }
 
     private fun handleStrokeInput(rawX: Float, rawY: Float, mag: Float) {
@@ -1099,22 +1094,8 @@ class JoyTypeService : InputMethodService() {
                         // Send the entire block to a single coroutine (for spaces)
                         smartCommitText(wordToCommit)
                     } else if (currentMode == InputMode.ABC && currentPredictions == ABC_DIGITS) {
-                        
-                        // --- STAGE 1 (Dive into the Letters) ---
-                        val targetDigit = currentPredictions[predictionIndex].first()
-                        val chars = mutableListOf<String>()
-                        val baseChars = t9Engine.getCharsForDigit(targetDigit)
-                        for (c in baseChars) {
-                            chars.add(c.uppercaseChar().toString())
-                            chars.add(c.toString())
-                        }
-                        chars.add(targetDigit.toString())
-                        
-                        currentPredictions = chars
-                        predictionIndex = 0
-                        updateUI()
+                        diveIntoAbcStage2(currentPredictions[predictionIndex])
                         return // Exit early so we don't trigger the resetState() below
-                        
                     } else {
                         smartCommitText(currentPredictions[predictionIndex])
                     }
@@ -1293,20 +1274,7 @@ class JoyTypeService : InputMethodService() {
                         ic.endBatchEdit()
                         lastAcceptTime = 0L
                     } else if (currentMode == InputMode.ABC && currentPredictions == ABC_DIGITS) {
-                        
-                        // --- STAGE 1 (Dive into the Letters) ---
-                        val targetDigit = currentPredictions[predictionIndex].first()
-                        val chars = mutableListOf<String>()
-                        val baseChars = t9Engine.getCharsForDigit(targetDigit)
-                        for (c in baseChars) {
-                            chars.add(c.uppercaseChar().toString())
-                            chars.add(c.toString())
-                        }
-                        chars.add(targetDigit.toString())
-                        
-                        currentPredictions = chars
-                        predictionIndex = 0
-                        updateUI()
+                        diveIntoAbcStage2(currentPredictions[predictionIndex])
                         return // Exit early so we don't trigger the resetState() below
                     } else {
                         smartCommitText(" ")
@@ -1616,6 +1584,29 @@ class JoyTypeService : InputMethodService() {
         highlightAnchorIndex = -1
     }
 
+    private fun diveIntoAbcStage2(targetStr: String) {
+        val targetDigit = targetStr.first()
+        val chars = mutableListOf<String>()
+        
+        // Note: Change '1' to '5' here if you want 5 to trigger special characters
+        if (targetDigit == '1') {
+            chars.addAll(SPECIAL_CHARS)
+            chars.add("1") // Put the digit at the very end as a fallback
+        } else {
+            val baseChars = t9Engine.getCharsForDigit(targetDigit)
+            for (c in baseChars) {
+                chars.add(c.uppercaseChar().toString())
+                chars.add(c.toString())
+            }
+            chars.add(targetDigit.toString())
+        }
+        
+        currentPredictions = chars
+        predictionIndex = 0
+        isRadialMenuOpen = false 
+        updateUI()
+    }
+
     private fun updateUI() {
         // 1. Structural Updates
         if (currentMode == InputMode.MACRO && ::tvBreadcrumb.isInitialized) {
@@ -1652,8 +1643,11 @@ class JoyTypeService : InputMethodService() {
             val end = kotlin.math.min(start + engine.maxSectors, activeItems.size)
             if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
         } else {
-            // ARRAY FIX: If the wheel is closed, draw EVERYTHING. No slicing
-            activeItems 
+            // FIX: Paginate linearly based on predictionIndex when resting!
+            val linearPage = if (activeItems.isNotEmpty()) predictionIndex / engine.maxSectors else 0
+            val start = linearPage * engine.maxSectors
+            val end = kotlin.math.min(start + engine.maxSectors, activeItems.size)
+            if (start < activeItems.size) activeItems.subList(start, end) else emptyList()
         }
 
         val activeColor = if (isRadialMenuOpen && radialDidMove) {
@@ -1667,44 +1661,40 @@ class JoyTypeService : InputMethodService() {
         // 5. Draw the Bar
         val valDisplay = if (isRadialMenuOpen) {
             val arrows = arrayOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
-            
             val editorInfo = currentInputEditorInfo
             val isEmulator = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
 
             itemsToDraw.mapIndexed { index, word ->
                 val isDisabled = isEmulator && state == RadialState.UTILITY && word in listOf("Copy", "Cut", "Select Word", "Select All")
-                
-                val textToDraw = if (isDisabled) {
-                    "<font color='#444444'>$word</font>"
-                } else if (state == RadialState.SPECIAL_CHARS) {
-                    "  $word  "
-                } else word
-                
-                // Only display directional arrows if it's the standard 8-way wheel
+                val textToDraw = if (isDisabled) "<font color='#444444'>$word</font>" else if (state == RadialState.SPECIAL_CHARS) "  $word  " else word
                 val dir = if (engine.maxSectors == 8 && index < arrows.size) "${arrows[index]} " else ""
                 
                 if (index == engine.radialSelectedIndex && !isDisabled) {
-                    "<b>[<font color='#555555'>$dir</font><font color='$activeColor'>$textToDraw</font><font color='#555555'>]</font></b>" 
+                    "<b>[<font color='#555555'>$dir</font><font color='$activeColor'>$textToDraw</font>]</b>"
                 } else {
                     "<font color='#555555'>$dir$textToDraw</font>"
                 }
             }.joinToString("   ")
         } else {
             itemsToDraw.mapIndexed { index, word ->
-                if (index == predictionIndex) "<b><font color='$activeColor'>[$word]</font></b>" 
+                // Account for the linear page offset when highlighting!
+                val adjustedIndex = index + (if (activeItems.isNotEmpty()) (predictionIndex / engine.maxSectors) * engine.maxSectors else 0)
+                if (adjustedIndex == predictionIndex) "<b><font color='$activeColor'>[$word]</font></b>" 
                 else "<font color='#777777'>$word</font>" 
             }.joinToString("   ")
         }
 
         tvPredictions.text = android.text.Html.fromHtml(valDisplay, android.text.Html.FROM_HTML_MODE_LEGACY)
 
-        // 6. Pagination Badge
+        // 6. Pagination Badge (WITH OVERLAP FIX)
         val maxPages = kotlin.math.ceil(activeItems.size.toDouble() / engine.maxSectors).toInt().coerceAtLeast(1)
         if (isRadialMenuOpen && maxPages > 1) {
             tvPaginationBadge.text = "[${engine.radialPage + 1}/$maxPages]"
             tvPaginationBadge.visibility = View.VISIBLE
+            tvModeBadge.visibility = View.GONE // THE FIX: Hide Mode Badge when paginating
         } else {
             tvPaginationBadge.visibility = View.GONE
+            tvModeBadge.visibility = View.VISIBLE // Restore Mode Badge
         }
 
         // 7. Scroll Offset Fix
@@ -1837,31 +1827,32 @@ class JoyTypeService : InputMethodService() {
         val ic = currentInputConnection ?: return
         val editorInfo = currentInputEditorInfo
         
-        // 1. Detect if the app is an emulator/game asking for hardware keys
-        val requiresHardwareKeys = editorInfo == null || 
-                                   editorInfo.inputType == android.text.InputType.TYPE_NULL
+        val requiresHardwareKeys = editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
         
         if (requiresHardwareKeys) {
-            // 2. THE GBOARD METHOD: Use Android's built-in translator!
-            val charMap = android.view.KeyCharacterMap.load(android.view.KeyCharacterMap.VIRTUAL_KEYBOARD)
-            val events = charMap.getEvents(textToCommit.toCharArray())
-            
-            if (events != null) {
-                // If it's a multi-character string (like a T9 word), we launch a coroutine 
-                // to add microscopic delays so the emulator's polling loop doesn't drop keys.
-                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                    for (event in events) {
-                        ic.sendKeyEvent(event)
-                        // 10ms is fast enough to feel instant, but slow enough for Winlator to catch it
-                        kotlinx.coroutines.delay(10) 
+            // FIX: Pure mathematical hardware spoofing
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                hardwareTypingMutex.withLock {
+                    for (char in textToCommit) {
+                        val keyCode = charToKeyCode(char)
+                        if (keyCode == KeyEvent.KEYCODE_UNKNOWN) continue
+                        
+                        val useShift = requiresShift(char)
+                        
+                        if (useShift) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT))
+                        
+                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+                        kotlinx.coroutines.delay(10)
+                        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+                        
+                        if (useShift) ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT))
+                        
+                        kotlinx.coroutines.delay(10) // Micro-buffer between distinct letters
                     }
                 }
-            } else {
-                // Failsafe: If the charMap fails (rare), try to brute-force a software commit anyway
-                ic.commitText(textToCommit, 1)
             }
         } else {
-            // 3. Normal App (Chrome, Discord, etc.) - Use standard software string injection
+            // Normal Android App
             ic.commitText(textToCommit, 1)
         }
     }
@@ -1961,5 +1952,53 @@ class JoyTypeService : InputMethodService() {
         }
         
         return word
+    }
+
+    private fun charToKeyCode(char: Char): Int {
+        return when (char.lowercaseChar()) {
+            in 'a'..'z' -> KeyEvent.KEYCODE_A + (char.lowercaseChar() - 'a')
+            in '0'..'9' -> KeyEvent.KEYCODE_0 + (char - '0')
+            ' ' -> KeyEvent.KEYCODE_SPACE
+            '.' -> KeyEvent.KEYCODE_PERIOD
+            ',' -> KeyEvent.KEYCODE_COMMA
+            '?' -> KeyEvent.KEYCODE_SLASH 
+            '!' -> KeyEvent.KEYCODE_1 
+            '@' -> KeyEvent.KEYCODE_2 
+            '-' -> KeyEvent.KEYCODE_MINUS
+            '_' -> KeyEvent.KEYCODE_MINUS 
+            ':' -> KeyEvent.KEYCODE_SEMICOLON 
+            ';' -> KeyEvent.KEYCODE_SEMICOLON
+            '\'' -> KeyEvent.KEYCODE_APOSTROPHE
+            '"' -> KeyEvent.KEYCODE_APOSTROPHE 
+            '(' -> KeyEvent.KEYCODE_9 
+            ')' -> KeyEvent.KEYCODE_0 
+            '/' -> KeyEvent.KEYCODE_SLASH
+            '\\' -> KeyEvent.KEYCODE_BACKSLASH
+            '&' -> KeyEvent.KEYCODE_7 
+            '#' -> KeyEvent.KEYCODE_3 
+            '%' -> KeyEvent.KEYCODE_5 
+            '*' -> KeyEvent.KEYCODE_8 
+            '+' -> KeyEvent.KEYCODE_EQUALS 
+            '=' -> KeyEvent.KEYCODE_EQUALS
+            '<' -> KeyEvent.KEYCODE_COMMA 
+            '>' -> KeyEvent.KEYCODE_PERIOD 
+            '$' -> KeyEvent.KEYCODE_4 
+            '~' -> KeyEvent.KEYCODE_GRAVE 
+            '`' -> KeyEvent.KEYCODE_GRAVE
+            '{' -> KeyEvent.KEYCODE_LEFT_BRACKET 
+            '}' -> KeyEvent.KEYCODE_RIGHT_BRACKET 
+            '[' -> KeyEvent.KEYCODE_LEFT_BRACKET
+            ']' -> KeyEvent.KEYCODE_RIGHT_BRACKET
+            '|' -> KeyEvent.KEYCODE_BACKSLASH 
+            '^' -> KeyEvent.KEYCODE_6 
+            '\n' -> KeyEvent.KEYCODE_ENTER
+            else -> KeyEvent.KEYCODE_UNKNOWN
+        }
+    }
+
+    private fun requiresShift(char: Char): Boolean {
+        if (char.isUpperCase()) return true
+        val shiftChars = listOf('?', '!', '@', '_', ':', '"', '(', ')', '&', '#', '%', '*', '+', '<', '>', '$', '~', '{', '}', '|', '^')
+        return char in shiftChars
     }
 }

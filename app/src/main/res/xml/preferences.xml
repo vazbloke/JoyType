@@ -25,11 +25,6 @@
             android:max="1000" 
             app:defaultValue="600"
             app:showSeekBarValue="true" />
-        <androidx.preference.SwitchPreferenceCompat
-            android:key="visual_debug_mode"
-            android:title="Visual Debug Mode"
-            android:summary="Show the 9-segment grid and joystick trace line"
-            android:defaultValue="false" />
     </androidx.preference.PreferenceCategory>
 
     <androidx.preference.PreferenceCategory android:title="Haptics &amp; Feedback">
@@ -108,6 +103,12 @@
     </androidx.preference.PreferenceCategory>
 
     <androidx.preference.PreferenceCategory android:title="Experimental">
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="visual_debug_mode"
+            android:title="Visual Debug Mode"
+            android:summary="Show the 9-segment grid and joystick trace line"
+            android:defaultValue="false" />
+            
         <androidx.preference.SwitchPreferenceCompat
             android:key="pair_input_mode"
             android:title="Pair Input Mode"

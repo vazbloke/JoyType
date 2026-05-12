@@ -137,8 +137,8 @@ class SettingsActivity : AppCompatActivity() {
         val modKeys = listOf("key_mod_1", "key_mod_2", "key_mod_3")
         
         // 2. Dynamically pull all action strings from your SSOT Enum!
-        val actionKeys = JoyTypeService.Action.values()
-            .filter { it != JoyTypeService.Action.NONE }
+        val actionKeys = Action.values()
+            .filter { it != Action.NONE }
             .map { it.prefKey }
             
         // 3. Combine them for the clash prevention loop
@@ -161,7 +161,7 @@ class SettingsActivity : AppCompatActivity() {
 
             for (key in allKeys) {
                 val pref = findPreference<Preference>(key)
-                val action = JoyTypeService.Action.values().firstOrNull { it.prefKey == key }
+                val action = Action.values().firstOrNull { it.prefKey == key }
 
                 // --- THE REFACTOR ---
                 // Pull defaults directly from the Enum (or hardcode the 3 core mods)
@@ -172,7 +172,6 @@ class SettingsActivity : AppCompatActivity() {
                         else -> -1
                     }
                 } else {
-                    val action = JoyTypeService.Action.values().firstOrNull { it.prefKey == key }
                     action?.defaultKey ?: -1
                 }
 

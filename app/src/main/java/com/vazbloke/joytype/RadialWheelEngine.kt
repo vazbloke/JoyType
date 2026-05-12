@@ -2,17 +2,24 @@ package com.vazbloke.joytype
 
 import kotlin.math.atan2
 
-//  FIX maxSectors is now an intrinsic property of the Engine
 class RadialWheelEngine(val maxSectors: Int, private val listener: RadialWheelListener) {
 
     var radialPage = 0
         private set
     var radialSelectedIndex = 0
         private set
+        
+    // THE NEW SINGLE SOURCE OF TRUTH
+    var absoluteIndex = 0
+        private set
 
     private var radialLastSector = -1
     private var isPeggedAtStart = false
     private var isPeggedAtEnd = false
+
+    private var isSelectorActive = false
+
+    var candidates = listOf<String>()
 
     interface RadialWheelListener {
         fun onIndexChanged(newIndex: Int, page: Int)
@@ -20,11 +27,15 @@ class RadialWheelEngine(val maxSectors: Int, private val listener: RadialWheelLi
         fun onThud()
     }
 
+    fun setSelectorActivationState(activationState: Boolean) {
+        isSelectorActive = activationState
+    }
+
     /**
      * Feeds the joystick data into the engine. 
      * Calculates octants, crossovers, pagination, and triggers haptics.
      */
-    fun updateInput(x: Float, y: Float, mag: Float, totalItemsCount: Int, disabledIndices: Set<Int> = emptySet()) {
+    fun updateInput(x: Float, y: Float, mag: Float, disabledIndices: Set<Int> = emptySet()) {
         if (mag <= 0.3f) {
             // Stick released -> Reset scroll states
             radialLastSector = -1
@@ -32,6 +43,8 @@ class RadialWheelEngine(val maxSectors: Int, private val listener: RadialWheelLi
             isPeggedAtEnd = false
             return
         }
+
+        val totalItemsCount = candidates.size
 
         var angle = atan2(y.toDouble(), x.toDouble())
         angle += Math.PI / 2.0
@@ -126,6 +139,8 @@ class RadialWheelEngine(val maxSectors: Int, private val listener: RadialWheelLi
 
             if (snappedIndex != radialSelectedIndex) {
                 radialSelectedIndex = snappedIndex
+                absoluteIndex = (radialPage * maxSectors) + radialSelectedIndex
+                
                 if (!isPeggedAtStart && !isPeggedAtEnd) {
                     listener.onTick()
                 }
@@ -134,9 +149,33 @@ class RadialWheelEngine(val maxSectors: Int, private val listener: RadialWheelLi
         }
     }
 
+    // --- NEW LINEAR INDEX MANAGERS ---
+
+    fun cycleForward() {
+        if (candidates.isEmpty()) return
+        setAbsoluteIndex((absoluteIndex + 1) % candidates.size)
+        listener.onTick()
+        listener.onIndexChanged(radialSelectedIndex, radialPage)
+    }
+
+    fun cycleBackward() {
+        if (candidates.isEmpty()) return
+        setAbsoluteIndex((absoluteIndex - 1 + candidates.size) % candidates.size)
+        listener.onTick()
+        listener.onIndexChanged(radialSelectedIndex, radialPage)
+    }
+
+    fun setAbsoluteIndex(index: Int) {
+        if (candidates.isEmpty()) return
+        absoluteIndex = index.coerceIn(0, candidates.size - 1)
+        radialPage = absoluteIndex / maxSectors
+        radialSelectedIndex = absoluteIndex % maxSectors
+    }
+
     fun reset() {
         radialPage = 0
         radialSelectedIndex = 0
+        absoluteIndex = 0
         radialLastSector = -1
         isPeggedAtStart = false
         isPeggedAtEnd = false

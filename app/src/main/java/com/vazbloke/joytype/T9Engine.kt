@@ -14,10 +14,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+import android.graphics.PointF
+
 class TrieNode(
     var isWord: Boolean = false,
     var frequency: Int = 0,
-    val children: MutableMap<Char, TrieNode> = mutableMapOf()
+    // THE FIX: A thread-safe map so the background loader and the UI can access it simultaneously!
+    val children: MutableMap<Char, TrieNode> = java.util.concurrent.ConcurrentHashMap()
 )
 
 class T9Engine {
@@ -48,13 +51,43 @@ class T9Engine {
     private var allWordsList = mutableListOf<String>()
     private var customWordsList = mutableListOf<String>()
 
-    // Generates a unique fingerprint based on the APK's update time and the custom dictionary's modified time
+    val currentStrokePath = mutableListOf<PointF>()
+    val wordProbabilities = mutableListOf<Map<Char, Float>>()
+    var currentPredictions = listOf<String>()
+    var predictionIndex = 0
+    val lastAcceptedProbabilities = mutableListOf<Map<Char, Float>>() // NEW: Memory State
+
+    // Generates a mathematical fingerprint of the actual file contents
     private fun getCacheFingerprint(context: Context): String {
-        val appUpdateTime = try {
-            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
-        } catch (e: Exception) { 0L }
-        val customDictTime = getCustomDictFile().lastModified()
-        return "${appUpdateTime}_${customDictTime}"
+        val crc = java.util.zip.CRC32()
+        val assetFiles = listOf("en.csv", "dlc.csv", "en_modern_dlc.csv", "en_explicit_dlc.csv", "en_verbs_dlc.csv")
+        
+        for (fileName in assetFiles) {
+            try {
+                context.assets.open(fileName).use { inputStream ->
+                    val buffer = ByteArray(8192)
+                    var bytesRead: Int
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        crc.update(buffer, 0, bytesRead)
+                    }
+                }
+            } catch (e: Exception) {} // Fails silently if DLC is missing
+        }
+        
+        try {
+            val customFile = getCustomDictFile(context)
+            if (customFile.exists()) {
+                customFile.inputStream().use { inputStream ->
+                    val buffer = ByteArray(8192)
+                    var bytesRead: Int
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        crc.update(buffer, 0, bytesRead)
+                    }
+                }
+            }
+        } catch (e: Exception) {}
+        
+        return crc.value.toString()
     }
 
     fun loadDictionary(context: Context) {
@@ -83,28 +116,33 @@ class T9Engine {
         allWordsList.clear()
         customWordsList.clear()
 
-        // 1. Load Base Dictionary
-        try {
-            val inputStream = context.assets.open("en.csv")
-            val reader = BufferedReader(InputStreamReader(inputStream))
-            reader.forEachLine { line ->
-                val parts = line.split("\t", ",")
-                if (parts.isNotEmpty()) {
-                    val word = parts[0].lowercase()
-                    // Allow apostrophes through the filter!
-                    if (word.all { it in 'a'..'z' || it == '\'' }) {
-                        val freq = if (parts.size > 1) parts[1].toIntOrNull() ?: 0 else 0
-                        insertWord(word, freq)
-                        allWordsList.add(word)
+        // 1. Load Base Dictionary & All DLCs
+        val assetFiles = listOf("en.csv", "dlc.csv", "en_modern_dlc.csv", "en_explicit_dlc.csv", "en_verbs_dlc.csv")
+        
+        for (fileName in assetFiles) {
+            try {
+                val inputStream = context.assets.open(fileName)
+                val reader = BufferedReader(InputStreamReader(inputStream))
+                reader.forEachLine { line ->
+                    val parts = line.split("\t", ",")
+                    if (parts.isNotEmpty()) {
+                        val word = parts[0].lowercase()
+                        if (word.all { it in 'a'..'z' || it == '\'' }) {
+                            val freq = if (parts.size > 1) parts[1].toIntOrNull() ?: 0 else 0
+                            insertWord(word, freq)
+                            if (!allWordsList.contains(word)) allWordsList.add(word)
+                        }
                     }
                 }
+                inputStream.close()
+            } catch (e: Exception) { 
+                // Skip gracefully if a DLC file doesn't exist
             }
-            inputStream.close()
-        } catch (e: Exception) { e.printStackTrace() }
+        }
 
         // 2. Load Custom Dictionary
         try {
-            val customFile = getCustomDictFile()
+            val customFile = getCustomDictFile(context)
             if (customFile.exists()) {
                 customFile.forEachLine { line ->
                     val parts = line.split("\t", ",")
@@ -135,6 +173,15 @@ class T9Engine {
             }
             prefs.edit().putString("dict_cache_fingerprint", currentFingerprint).apply()
         } catch (e: Exception) { e.printStackTrace() }
+    }
+
+    fun updateLivePredictions() {
+        if (wordProbabilities.isNotEmpty()) {
+            currentPredictions = getProbabilisticPredictions(wordProbabilities)
+            predictionIndex = 0
+        } else {
+            currentPredictions = emptyList()
+        }
     }
 
     private fun insertWord(word: String, frequency: Int) {
@@ -279,30 +326,20 @@ class T9Engine {
     fun getCharsForDigit(digit: Char): List<Char> = digitToChars[digit] ?: emptyList()
     fun getAllWords(): List<String> = allWordsList
 
-    fun addCustomWord(word: String) {
-        insertWord(word.lowercase(), 999999)
-        try { getCustomDictFile().appendText("${word.lowercase()},999999\n") } catch (e: Exception) {}
-    }
-
     // Change this from private to public in T9Engine.kt
     fun wordToSequence(word: String): String {
         // THE FIX: Force lowercase so capitalized words don't crash into a '0' mapping!
         return word.lowercase().map { charToDigit[it] ?: '0' }.joinToString("")
     }
 
-    // Find getCustomDictFile() and make it public so our Activity can use it:
-    fun getCustomDictFile(): File {
-        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val t9Dir = File(downloadsDir, "JoyType")
-        if (!t9Dir.exists()) t9Dir.mkdirs()
-        return File(t9Dir, "customdictionary.csv")
+    fun getCustomDictFile(context: Context): File {
+        return File(context.filesDir, "customdictionary.csv")
     }
 
-    // Add these new management functions:
-    fun getAllCustomWords(): List<String> {
+    fun getAllCustomWords(context: Context): List<String> {
         val words = mutableListOf<String>()
         try {
-            val file = getCustomDictFile()
+            val file = getCustomDictFile(context)
             if (file.exists()) {
                 file.forEachLine { line ->
                     val parts = line.split("\t", ",")
@@ -313,9 +350,14 @@ class T9Engine {
         return words.sorted()
     }
 
-    fun overwriteCustomDictionary(newWords: List<String>) {
+    fun addCustomWord(word: String, context: Context) {
+        insertWord(word.lowercase(), 999999)
+        try { getCustomDictFile(context).appendText("${word.lowercase()},999999\n") } catch (e: Exception) {}
+    }
+
+    fun overwriteCustomDictionary(newWords: List<String>, context: Context) {
         try {
-            val file = getCustomDictFile()
+            val file = getCustomDictFile(context)
             file.writeText("") // Clear file
             for (word in newWords) {
                 file.appendText("${word.lowercase()},999999\n")
@@ -377,3 +419,4 @@ class T9Engine {
         }
     }
 }
+

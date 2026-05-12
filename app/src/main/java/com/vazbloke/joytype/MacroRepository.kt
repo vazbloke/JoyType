@@ -8,26 +8,16 @@ import org.json.JSONObject
 object MacroRepository {
     private const val PREF_KEY = "saved_macro_library"
 
+    // Strict constraint: Only two types of macros exist in the ecosystem
     sealed class Macro {
         abstract val name: String
+        data class Chain(override val name: String, val nodes: List<ChainNode>) : Macro()
+        data class Pasteboard(override val name: String, val text: String) : Macro()
+    }
 
-        // Type 1: Hardware Keystrokes (Needs precise timing/delays)
-        data class Keystroke(
-            override val name: String, 
-            val sequence: List<Int>
-        ) : Macro()
-
-        // Type 2: Pasteboard (Fire-and-forget text)
-        data class Pasteboard(
-            override val name: String, 
-            val text: String
-        ) : Macro()
-
-        // Type 3: Lua Script (Advanced logic)
-        data class LuaScript(
-            override val name: String, 
-            val scriptContent: String
-        ) : Macro()
+    sealed class ChainNode {
+        data class Text(val content: String) : ChainNode()
+        data class KeyCode(val code: Int) : ChainNode()
     }
 
     fun loadMacros(prefs: SharedPreferences): List<Macro> {
@@ -45,26 +35,31 @@ object MacroRepository {
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
                 val name = obj.getString("name")
-                
-                // Smart fallback for old V1 macros
-                val type = if (obj.has("type")) obj.getString("type") else "keystroke"
+                val type = obj.getString("type")
 
                 when (type) {
-                    "keystroke" -> {
-                        val seqArray = obj.getJSONArray("sequence")
-                        val sequence = mutableListOf<Int>()
-                        for (j in 0 until seqArray.length()) {
-                            sequence.add(seqArray.getInt(j))
-                        }
-                        macros.add(Macro.Keystroke(name, sequence))
+                    "Pasteboard" -> {
+                        macros.add(Macro.Pasteboard(name, obj.optString("text", "")))
                     }
-                    "pasteboard" -> macros.add(Macro.Pasteboard(name, obj.optString("text", "")))
-                    "luascript" -> macros.add(Macro.LuaScript(name, obj.optString("scriptContent", "")))
+                    "Chain" -> {
+                        val nodesArray = obj.getJSONArray("nodes")
+                        val nodesList = mutableListOf<ChainNode>()
+                        for (j in 0 until nodesArray.length()) {
+                            val nodeObj = nodesArray.getJSONObject(j)
+                            val nodeType = nodeObj.getString("nodeType")
+                            if (nodeType == "Text") {
+                                nodesList.add(ChainNode.Text(nodeObj.getString("content")))
+                            } else if (nodeType == "KeyCode") {
+                                nodesList.add(ChainNode.KeyCode(nodeObj.getInt("code")))
+                            }
+                        }
+                        macros.add(Macro.Chain(name, nodesList))
+                    }
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            return getDefaultLibrary() // Failsafe
+            return getDefaultLibrary() // Failsafe against corrupted JSON
         }
         return macros
     }
@@ -76,19 +71,28 @@ object MacroRepository {
             obj.put("name", macro.name)
             
             when (macro) {
-                is Macro.Keystroke -> {
-                    obj.put("type", "keystroke")
-                    val seqArray = JSONArray()
-                    macro.sequence.forEach { seqArray.put(it) }
-                    obj.put("sequence", seqArray)
-                }
                 is Macro.Pasteboard -> {
-                    obj.put("type", "pasteboard")
+                    obj.put("type", "Pasteboard")
                     obj.put("text", macro.text)
                 }
-                is Macro.LuaScript -> {
-                    obj.put("type", "luascript")
-                    obj.put("scriptContent", macro.scriptContent)
+                is Macro.Chain -> {
+                    obj.put("type", "Chain")
+                    val nodesArray = JSONArray()
+                    for (node in macro.nodes) {
+                        val nodeObj = JSONObject()
+                        when (node) {
+                            is ChainNode.Text -> {
+                                nodeObj.put("nodeType", "Text")
+                                nodeObj.put("content", node.content)
+                            }
+                            is ChainNode.KeyCode -> {
+                                nodeObj.put("nodeType", "KeyCode")
+                                nodeObj.put("code", node.code)
+                            }
+                        }
+                        nodesArray.put(nodeObj)
+                    }
+                    obj.put("nodes", nodesArray)
                 }
             }
             jsonArray.put(obj)
@@ -96,18 +100,14 @@ object MacroRepository {
         prefs.edit().putString(PREF_KEY, jsonArray.toString()).apply()
     }
 
-    fun textToKeySequence(text: String): List<Int> {
-        val codes = mutableListOf<Int>()
-        for (char in text.uppercase()) {
-            if (char in 'A'..'Z') codes.add(KeyEvent.KEYCODE_A + (char - 'A'))
-            else if (char in '0'..'9') codes.add(KeyEvent.KEYCODE_0 + (char - '0'))
-            else if (char == ' ') codes.add(KeyEvent.KEYCODE_SPACE)
-        }
-        return codes
-    }
-
     private fun getDefaultLibrary() = listOf(
-        Macro.Keystroke("Claw: God Mode", listOf(KeyEvent.KEYCODE_M, KeyEvent.KEYCODE_P, KeyEvent.KEYCODE_K, KeyEvent.KEYCODE_F, KeyEvent.KEYCODE_A)),
+        Macro.Chain("Claw: God Mode", listOf(
+            ChainNode.KeyCode(KeyEvent.KEYCODE_M),
+            ChainNode.KeyCode(KeyEvent.KEYCODE_P),
+            ChainNode.KeyCode(KeyEvent.KEYCODE_K),
+            ChainNode.KeyCode(KeyEvent.KEYCODE_F),
+            ChainNode.KeyCode(KeyEvent.KEYCODE_A)
+        )),
         Macro.Pasteboard("Paste Test", "player.additem 0000000f 100")
     )
 }

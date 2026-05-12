@@ -45,7 +45,7 @@ class KeyBindingPreference(context: Context, attrs: AttributeSet?) : Preference(
             val joyRadial = prefs.getString("joy_radial_mod", "NONE")
             val joyCursor = prefs.getString("joy_cursor_mod", "NONE")
             
-            val options = arrayOf("NONE", "M1", "M2", "M3")
+            val options = arrayOf("NONE", "M1", "M2")
             val displayOptions = options.map { 
                 if (it != "NONE" && (it == joyRadial || it == joyCursor)) "$it (Joystick)" else it 
             }.toTypedArray()
@@ -81,7 +81,7 @@ class InlineSpinnerPreference(context: Context, attrs: AttributeSet?) : Preferen
             val otherJoyKey = if (key == "joy_radial_mod") "joy_cursor_mod" else "joy_radial_mod"
             val usedByOtherJoy = prefs.getString(otherJoyKey, "NONE") ?: "NONE"
 
-            val options = arrayOf("NONE", "M1", "M2", "M3")
+            val options = arrayOf("NONE", "M1", "M2")
             val displayOptions = options.map {
                 if (it != "NONE") {
                     if (it == usedByOtherJoy) "$it (Other Joystick feature)"

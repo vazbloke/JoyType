@@ -24,7 +24,7 @@ class CustomDictionaryActivity : AppCompatActivity() {
         setContentView(R.layout.activity_custom_dictionary)
 
         engine = T9Engine()
-        wordsList = engine.getAllCustomWords().toMutableList()
+        wordsList = engine.getAllCustomWords(this).toMutableList()
 
         val listView = findViewById<ListView>(R.id.list_words)
         adapter = WordAdapter()
@@ -94,8 +94,17 @@ class CustomDictionaryActivity : AppCompatActivity() {
     }
 
     private fun saveAndRefresh() {
+        // Clean up duplicates and sort
+        wordsList = wordsList.distinct().toMutableList()
         wordsList.sort()
-        engine.overwriteCustomDictionary(wordsList)
+        
+        // THE FIX: Route through the Engine so both files use the exact same logic and filename!
+        engine.overwriteCustomDictionary(wordsList, this)
+        
+        // Nuke the binary cache so the T9Engine is forced to rebuild from the new file
+        val binFile = java.io.File(cacheDir, "dictionary_cache.bin")
+        if (binFile.exists()) binFile.delete()
+
         adapter.notifyDataSetChanged()
         
         // Force the live keyboard service to reload its memory!

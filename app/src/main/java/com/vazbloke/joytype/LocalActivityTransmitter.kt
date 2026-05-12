@@ -7,6 +7,8 @@ class LocalActivityTransmitter(private val editText: EditText) : OutputTransmitt
     // We don't need hardware spoofing for a local text box
     override val isHardwareSpoofingRequired = false 
 
+    override fun sendGamepadState(buttons: Int, leftX: Float, leftY: Float, rightX: Float, rightY: Float) {} // Ignored locally
+
     override fun commitText(text: String) {
         val start = editText.selectionStart.coerceAtLeast(0)
         val end = editText.selectionEnd.coerceAtLeast(0)

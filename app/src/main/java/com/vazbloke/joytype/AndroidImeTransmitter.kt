@@ -17,6 +17,8 @@ class AndroidImeTransmitter(private val ims: InputMethodService) : OutputTransmi
             val editorInfo = ims.currentInputEditorInfo
             return editorInfo == null || editorInfo.inputType == android.text.InputType.TYPE_NULL
         }
+    
+    override fun sendGamepadState(buttons: Int, leftX: Float, leftY: Float, rightX: Float, rightY: Float) {} // Ignored locally
 
     private val hardwareTypingMutex = Mutex()
 

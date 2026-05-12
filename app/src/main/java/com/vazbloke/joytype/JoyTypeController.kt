@@ -47,6 +47,7 @@ class JoyTypeController(
     val t9Engine = T9Engine()
     
     // --- CORE STATE ---
+    var isGamepadMode = false // THE FIX: Toggle to bypass JoyType
     var currentMode = InputMode.PRE
         set(value) {
             field = value
@@ -195,7 +196,7 @@ class JoyTypeController(
 
     var glideCursorIndex = 0
     var highlightAnchorIndex = -1
-    var lastAcceptTime = 0L
+    var lastManualSpaceTime = 0L
 
     private val undoStack = java.util.Stack<EditorStateSnapshot>()
     private val redoStack = java.util.Stack<EditorStateSnapshot>()
@@ -617,19 +618,19 @@ class JoyTypeController(
                 val now = System.currentTimeMillis()
                 val engine = activeRadialEngine
                 val targetString = if (engine.candidates.isNotEmpty()) engine.candidates[engine.absoluteIndex] else ""
-
+                
                 if (targetString.isNotEmpty()) {
                     if (currentMode == InputMode.PRE) {
                         var wordToCommit = getAutoCapitalizedWord(targetString)
                         if (autoSpace) wordToCommit += " " 
                         transmitter.commitText(wordToCommit)
-                        lastAcceptTime = now
                     } else {
                         transmitter.commitText(targetString)
                     }
                     resetState()
                 } else {
-                    if (currentMode == InputMode.PRE && doubleAcceptPeriod && (now - lastAcceptTime < 500)) {
+                    // THE FIX: Ignore held keys (!isRepeat) so holding Space doesn't spawn periods!
+                    if (currentMode == InputMode.PRE && doubleAcceptPeriod && (now - lastManualSpaceTime < 500) && !isRepeat) {
                         val state = transmitter.getEditorState()
                         val textBefore = state?.text?.substring(0, state.selectionStart) ?: ""
                         val spacesMatch = Regex("\\s+$").find(textBefore)
@@ -638,14 +639,15 @@ class JoyTypeController(
                         if (spacesMatch != null) transmitter.deleteSurroundingText(spacesMatch.value.length, 0)
                         transmitter.commitText(". ")
                         transmitter.endBatchEdit()
-                        lastAcceptTime = 0L
+                        lastManualSpaceTime = 0L
                     } else if (currentMode == InputMode.ABC && engine.candidates == ABC_DIGITS) {
                         val str = if (engine.candidates.isNotEmpty()) engine.candidates[engine.absoluteIndex] else ""
                         if (str.isNotEmpty()) diveIntoAbcStage2(str)
                         return 
                     } else {
                         transmitter.commitText(" ")
-                        if (currentMode == InputMode.PRE) lastAcceptTime = now
+                        // THE FIX: Only update the timestamp for manual presses, not repeats!
+                        if (currentMode == InputMode.PRE && !isRepeat) lastManualSpaceTime = now
                     }
                 }
             }
@@ -857,7 +859,6 @@ class JoyTypeController(
                         val wordToCommit = getAutoCapitalizedWord(targetString)
                         transmitter.commitText(wordToCommit)
                         if (autoSpace) transmitter.commitText(" ")
-                        lastAcceptTime = System.currentTimeMillis()
                     }
                 }
                 abcRadialEngine -> {

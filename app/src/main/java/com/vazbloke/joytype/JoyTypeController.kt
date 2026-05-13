@@ -9,6 +9,8 @@ enum class ModifierKey { NONE, M1, M2 }
 data class KeyCombo(val keyCode: Int, val modifier: ModifierKey)
 enum class InputMode { PRE, ABC, MACRO }
 
+enum class HardwareMode { KEYBOARD, GAMEPAD, MOUSE }
+
 enum class Action(val xmlName: String, val defaultKey: Int, val defaultMod: ModifierKey) {
     ACCEPT("accept", KeyEvent.KEYCODE_BUTTON_R1, ModifierKey.NONE),
     RECOMPOSE("recompose", KeyEvent.KEYCODE_BUTTON_L1, ModifierKey.NONE),
@@ -47,7 +49,7 @@ class JoyTypeController(
     val t9Engine = T9Engine()
     
     // --- CORE STATE ---
-    var isGamepadMode = false // THE FIX: Toggle to bypass JoyType
+    var hardwareMode = HardwareMode.KEYBOARD // THE FIX: 3-way hardware state
     var currentMode = InputMode.PRE
         set(value) {
             field = value

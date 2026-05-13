@@ -19,6 +19,7 @@ class AndroidImeTransmitter(private val ims: InputMethodService) : OutputTransmi
         }
     
     override fun sendGamepadState(buttons: Int, leftX: Float, leftY: Float, rightX: Float, rightY: Float) {} // Ignored locally
+    override fun sendMouseState(leftClick: Boolean, rightClick: Boolean, dx: Int, dy: Int) {}
 
     private val hardwareTypingMutex = Mutex()
 

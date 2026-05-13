@@ -37,13 +37,41 @@ class JoyTypeFrontend(
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var macroLibrary: List<MacroRepository.Macro> = emptyList()
 
-    var onGamepadModeChanged: ((Boolean) -> Unit)? = null
+    var onHardwareModeChanged: ((HardwareMode) -> Unit)? = null
     private val modeToggleHandler = Handler(Looper.getMainLooper())
     private val modeToggleRunnable = Runnable {
-        controller.isGamepadMode = !controller.isGamepadMode
+        controller.hardwareMode = when (controller.hardwareMode) {
+            HardwareMode.KEYBOARD -> HardwareMode.GAMEPAD
+            HardwareMode.GAMEPAD -> HardwareMode.MOUSE
+            HardwareMode.MOUSE -> HardwareMode.KEYBOARD
+        }
         controller.haptics.thud()
-        Handler(Looper.getMainLooper()).postDelayed({ controller.haptics.thud() }, 150) // Double-thud feedback
-        onGamepadModeChanged?.invoke(controller.isGamepadMode)
+        Handler(Looper.getMainLooper()).postDelayed({ controller.haptics.thud() }, 150)
+        onHardwareModeChanged?.invoke(controller.hardwareMode)
+    }
+
+    // --- MOUSE ENGINE ---
+    private var isMouseL = false
+    private var isMouseR = false
+    private val mouseLoopRunnable = object : Runnable {
+        override fun run() {
+            if (controller.hardwareMode == HardwareMode.MOUSE) {
+                val deadzone = 0.15f 
+                var dx = 0
+                var dy = 0
+                
+                // THE FIX: Boost the multiplier so macOS actually registers the relative jump
+                if (kotlin.math.abs(gpRX) > deadzone) dx = (gpRX * 35f).toInt() 
+                if (kotlin.math.abs(gpRY) > deadzone) dy = (gpRY * 35f).toInt()
+
+                // THE FIX: We MUST fire the state if the stick is moved OR if a button is currently held!
+                // Previously, it only fired if dx/dy != 0, ignoring stationary clicks.
+                if (dx != 0 || dy != 0 || isMouseL || isMouseR) {
+                    transmitter.sendMouseState(isMouseL, isMouseR, dx, dy)
+                }
+            }
+            repeatHandler.postDelayed(this, 16L) 
+        }
     }
 
     private var cursorX = 0f
@@ -61,7 +89,10 @@ class JoyTypeFrontend(
     private var gpRY = 0f
 
     private fun updateGamepadState() {
-        if (controller.isGamepadMode) transmitter.sendGamepadState(gpButtons, gpLX, gpLY, gpRX, gpRY)
+        // THE FIX: Check the new Enum state instead of the old boolean!
+        if (controller.hardwareMode == HardwareMode.GAMEPAD) {
+            transmitter.sendGamepadState(gpButtons, gpLX, gpLY, gpRX, gpRY)
+        }
     }
 
     private fun getGamepadMask(keyCode: Int): Int = when (keyCode) {
@@ -77,6 +108,9 @@ class JoyTypeFrontend(
     }
 
     init {
+        // Start the continuous mouse loop immediately
+        repeatHandler.post(mouseLoopRunnable)
+        
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         visualDebugView.visibility = if (prefs.getBoolean("visual_debug_mode", false)) View.VISIBLE else View.GONE
 
@@ -178,24 +212,22 @@ class JoyTypeFrontend(
 
     // --- HARDWARE ROUTING ---
     fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (controller.isGamepadMode) {
+        if (controller.hardwareMode != HardwareMode.KEYBOARD) {
             gpLX = event.getAxisValue(MotionEvent.AXIS_X)
             gpLY = event.getAxisValue(MotionEvent.AXIS_Y)
             gpRX = event.getAxisValue(MotionEvent.AXIS_Z)
             gpRY = event.getAxisValue(MotionEvent.AXIS_RZ)
             
-            // Map the D-Pad Hat axes to buttons
-            val hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
-            val hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
-            gpButtons = if (hatX < -0.5f) gpButtons or (1 shl 14) else gpButtons and (1 shl 14).inv()
-            gpButtons = if (hatX > 0.5f) gpButtons or (1 shl 15) else gpButtons and (1 shl 15).inv()
-            gpButtons = if (hatY < -0.5f) gpButtons or (1 shl 12) else gpButtons and (1 shl 12).inv()
-            gpButtons = if (hatY > 0.5f) gpButtons or (1 shl 13) else gpButtons and (1 shl 13).inv()
-            
-            updateGamepadState()
-            
-            // THE FIX: Consume the event in MainActivity, but fall-through in the Service!
-            return context is android.app.Activity
+            if (controller.hardwareMode == HardwareMode.GAMEPAD) {
+                val hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
+                val hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+                gpButtons = if (hatX < -0.5f) gpButtons or (1 shl 14) else gpButtons and (1 shl 14).inv()
+                gpButtons = if (hatX > 0.5f) gpButtons or (1 shl 15) else gpButtons and (1 shl 15).inv()
+                gpButtons = if (hatY < -0.5f) gpButtons or (1 shl 12) else gpButtons and (1 shl 12).inv()
+                gpButtons = if (hatY > 0.5f) gpButtons or (1 shl 13) else gpButtons and (1 shl 13).inv()
+                updateGamepadState()
+            }
+            return context is android.app.Activity 
         }
 
         if (!(event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK ||
@@ -271,12 +303,15 @@ class JoyTypeFrontend(
     }
 
     fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (controller.isGamepadMode) {
+        if (controller.hardwareMode == HardwareMode.GAMEPAD) {
             val mask = getGamepadMask(keyCode)
             if (mask != 0) {
                 gpButtons = gpButtons or mask
                 updateGamepadState()
             }
+        } else if (controller.hardwareMode == HardwareMode.MOUSE) {
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_L1) { isMouseL = true; transmitter.sendMouseState(isMouseL, isMouseR, 0, 0) }
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_R1) { isMouseR = true; transmitter.sendMouseState(isMouseL, isMouseR, 0, 0) }
         }
 
         val isDPad = keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
@@ -290,10 +325,7 @@ class JoyTypeFrontend(
             modeToggleHandler.postDelayed(modeToggleRunnable, 1000L)
         }
 
-        if (controller.isGamepadMode) {
-            // THE FIX: Consume the event in MainActivity, but fall-through in the Service!
-            return context is android.app.Activity
-        }
+        if (controller.hardwareMode != HardwareMode.KEYBOARD) return context is android.app.Activity
 
         controller.syncModifiers()
 
@@ -366,12 +398,15 @@ class JoyTypeFrontend(
     }
 
     fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (controller.isGamepadMode) {
+        if (controller.hardwareMode == HardwareMode.GAMEPAD) {
             val mask = getGamepadMask(keyCode)
             if (mask != 0) {
                 gpButtons = gpButtons and mask.inv()
                 updateGamepadState()
             }
+        } else if (controller.hardwareMode == HardwareMode.MOUSE) {
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_L1) { isMouseL = false; transmitter.sendMouseState(isMouseL, isMouseR, 0, 0) }
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_R1) { isMouseR = false; transmitter.sendMouseState(isMouseL, isMouseR, 0, 0) }
         }
 
         repeatingAction = null
@@ -385,10 +420,7 @@ class JoyTypeFrontend(
         if (keyCode == controller.m1KeyCode) controller.isM1Held = false
         if (keyCode == controller.m2KeyCode) controller.isM2Held = false
 
-        if (controller.isGamepadMode) {
-            // THE FIX: Consume the event in MainActivity, but fall-through in the Service!
-            return context is android.app.Activity
-        }
+        if (controller.hardwareMode != HardwareMode.KEYBOARD) return context is android.app.Activity
 
         controller.syncModifiers()
 

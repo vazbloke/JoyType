@@ -13,6 +13,7 @@ interface OutputTransmitter {
     fun deleteSurroundingText(leftLength: Int, rightLength: Int)
     fun sendKeyPress(keyCode: Int, requiresShift: Boolean = false)
     fun sendGamepadState(buttons: Int, leftX: Float, leftY: Float, rightX: Float, rightY: Float)
+    fun sendMouseState(leftClick: Boolean, rightClick: Boolean, dx: Int, dy: Int) // THE NEW LINE
     
     // UI & Action Commands
     fun setSelection(start: Int, end: Int)

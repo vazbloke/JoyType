@@ -29,7 +29,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         // 1. Bind UI Elements
-        switchBluetooth = findViewById(R.id.switch_bluetooth)
+        switchBluetooth = findViewById(R.id.switch_bluetooth) // THE FIX: Add this line back!
         tvBtStatus = findViewById(R.id.tv_bt_status)
         cardBluetooth = findViewById(R.id.card_bluetooth)
         etSandbox = findViewById(R.id.et_sandbox)
@@ -38,7 +38,8 @@ class MainActivity : AppCompatActivity() {
         llBtUtilities = findViewById(R.id.ll_bt_utilities)
         btnMacSync = findViewById(R.id.btn_mac_sync)
 
-        val switchMode: SwitchMaterial = findViewById(R.id.switch_mode)
+
+        val toggleGroup = findViewById<com.google.android.material.button.MaterialButtonToggleGroup>(R.id.toggle_group_mode)
         val tvModeTitle: TextView = findViewById(R.id.tv_mode_title)
         val tvModeDesc: TextView = findViewById(R.id.tv_mode_desc)
         val keyboardContainer: View = findViewById(R.id.keyboard_container)
@@ -52,31 +53,55 @@ class MainActivity : AppCompatActivity() {
             onHideKeyboard = { finish() }
         )
 
-        // 3. Setup Callbacks NOW that Frontend exists
-        btnMacSync.setOnClickListener {
-            if (switchBluetooth.isChecked && ::bluetoothTransmitter.isInitialized) {
-                // THE FIX: Use commitText so it looks up 'z' in the character map!
-                bluetoothTransmitter.commitText("z")
+        val updateModeText = { mode: HardwareMode ->
+            when (mode) {
+                HardwareMode.KEYBOARD -> {
+                    tvModeTitle.text = "Keyboard Mode"
+                    tvModeDesc.text = "JoyType active. Hold M1+M2 to cycle."
+                    keyboardContainer.visibility = View.VISIBLE
+                }
+                HardwareMode.GAMEPAD -> {
+                    tvModeTitle.text = "Gamepad Mode"
+                    tvModeDesc.text = "Hardware controls active."
+                    keyboardContainer.visibility = View.GONE
+                }
+                HardwareMode.MOUSE -> {
+                    tvModeTitle.text = "Mouse Mode"
+                    tvModeDesc.text = "R-Stick to move. L1/R1 to click."
+                    keyboardContainer.visibility = View.GONE
+                }
             }
         }
 
-        // Sync UI when hardware buttons toggle the mode (M1+M2 Hold)
-        frontend.onGamepadModeChanged = { isGamepad ->
+        // Listener for when the user physically clicks the UI buttons
+        val toggleListener = com.google.android.material.button.MaterialButtonToggleGroup.OnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                val newMode = when (checkedId) {
+                    R.id.btn_mode_gp -> HardwareMode.GAMEPAD
+                    R.id.btn_mode_ms -> HardwareMode.MOUSE
+                    else -> HardwareMode.KEYBOARD
+                }
+                frontend.controller.hardwareMode = newMode
+                updateModeText(newMode)
+            }
+        }
+
+        // Sync UI when hardware buttons (M1+M2) toggle the mode behind the scenes
+        frontend.onHardwareModeChanged = { mode ->
             runOnUiThread {
-                switchMode.isChecked = isGamepad
-                tvModeTitle.text = if (isGamepad) "Gamepad Mode" else "Keyboard Mode"
-                tvModeDesc.text = if (isGamepad) "JoyType bypassed. Hardware controls active." else "JoyType active. Hold M1 + M2 for 1s to toggle."
-                keyboardContainer.visibility = if (isGamepad) View.GONE else View.VISIBLE
+                toggleGroup.removeOnButtonCheckedListener(toggleListener) // Prevent infinite loop
+                when (mode) {
+                    HardwareMode.KEYBOARD -> toggleGroup.check(R.id.btn_mode_kb)
+                    HardwareMode.GAMEPAD -> toggleGroup.check(R.id.btn_mode_gp)
+                    HardwareMode.MOUSE -> toggleGroup.check(R.id.btn_mode_ms)
+                }
+                updateModeText(mode)
+                toggleGroup.addOnButtonCheckedListener(toggleListener)
             }
         }
 
-        // Sync Backend when UI switch toggles the mode
-        switchMode.setOnCheckedChangeListener { _, isChecked ->
-            frontend.controller.isGamepadMode = isChecked
-            tvModeTitle.text = if (isChecked) "Gamepad Mode" else "Keyboard Mode"
-            tvModeDesc.text = if (isChecked) "JoyType bypassed. Hardware controls active." else "JoyType active. Hold M1 + M2 for 1s to toggle."
-            keyboardContainer.visibility = if (isChecked) View.GONE else View.VISIBLE
-        }
+        toggleGroup.addOnButtonCheckedListener(toggleListener)
+        toggleGroup.check(R.id.btn_mode_kb) // Set default UI state on launch
 
         // 4. Finally, setup the Bluetooth Pipeline
         setupBluetoothToggle()
